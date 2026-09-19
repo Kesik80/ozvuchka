@@ -415,3 +415,19 @@ textarea.field { min-height: 190px; resize: vertical; font: 400 15px/1.5 var(--r
 .center { text-align: center; }
 .mt { margin-top: 14px; }
 .spin { display: inline-block; width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -3px; }
+
+/* проверка ключей */
+.kc { border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; font-size: 14px; }
+.kc.ok { border-left-color: var(--ok); }
+.kc.warn { border-left-color: var(--warn); }
+.kc.dead { border-left-color: var(--onair); }
+.kc-h { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; }
+.kc-st { margin-left: auto; font-size: 12.5px; font-weight: 600; }
+.kc.ok .kc-st { color: var(--ok); }
+.kc.warn .kc-st { color: var(--warn); }
+.kc.dead .kc-st { color: var(--onair); }
+.kc-l { margin-top: 3px; }
+.kc-l.ok { color: var(--ok); }
+.kc-l.ok .muted { color: var(--muted); }
+.kc-l.bad { color: var(--onair); }
+.kc-hint { font-size: 12.5px; color: var(--muted); margin: 1px 0 0 16px; }

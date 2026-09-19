@@ -1972,6 +1972,55 @@
   }
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
 
+  // ── проверка ключей ElevenLabs ─────────────────────────
+  function openKeyCheck() {
+    if (!S.token) { openLogin(openKeyCheck); return; }
+    var box = h('div');
+    box.appendChild(h('p', { class: 'note', style: 'margin:0 0 10px' },
+      'Каждый ключ из Vercel проверяется по отдельности: доступ к аккаунту, голоса и пробная озвучка слова «Ja.» (около 3 символов). ' +
+      'Номер — порядок ключа в ELEVENLABS_API_KEYS, в конце — последние 4 символа ключа.'));
+    var tts = h('label', { class: 'chk' }, '<input type="checkbox" checked><span>Проверять озвучку<small>Без неё символы не тратятся, но нерабочую озвучку не видно</small></span>');
+    box.appendChild(tts);
+    var go = h('button', { class: 'btn primary block', type: 'button' }, 'Проверить');
+    box.appendChild(go);
+    var out = h('div', { class: 'mt' });
+    box.appendChild(out);
+    sheet('Проверка ключей', box, { wide: true });
+
+    function line(label, c, okText) {
+      if (!c) return '';
+      if (c.ok) return '<div class="kc-l ok">✓ ' + label + (okText ? ' <span class="muted">— ' + okText + '</span>' : '') + '</div>';
+      return '<div class="kc-l bad">✗ ' + label + ': ' + esc(c.error || 'ошибка') + '</div>' + (c.hint ? '<div class="kc-hint">' + esc(c.hint) + '</div>' : '');
+    }
+    function run() {
+      go.disabled = true; go.innerHTML = '<span class="spin"></span> Проверяю…';
+      out.innerHTML = '';
+      api('/api/check', { method: 'POST', body: { tts: tts.querySelector('input').checked } }).then(function (d) {
+        var good = 0;
+        (d.keys || []).forEach(function (k) {
+          var dead = k.user && !k.user.ok && k.voices && !k.voices.ok && (!k.tts || !k.tts.ok);
+          var works = k.tts ? k.tts.ok : (k.voices && k.voices.ok);
+          if (works) good++;
+          var card = h('div', { class: 'kc' + (works ? ' ok' : dead ? ' dead' : ' warn') });
+          card.innerHTML =
+            '<div class="kc-h"><b>Ключ ' + (k.index + 1) + '</b> <span class="muted">…' + esc(k.tail) + '</span>' +
+            '<span class="kc-st">' + (works ? 'работает' : dead ? 'не работает' : 'с ограничениями') + '</span></div>' +
+            line('Аккаунт', k.user, k.user && k.user.ok ? k.user.tier + ', осталось ' + nf(k.user.left) + ' из ' + nf(k.user.limit) : '') +
+            line('Голоса', k.voices, k.voices && k.voices.ok ? k.voices.count + (k.voices.premade ? ', есть стандартные' : ', стандартных нет') : '') +
+            line('Озвучка', k.tts, '');
+          out.appendChild(card);
+        });
+        out.insertBefore(h('p', { class: 'note', style: 'margin:0 0 10px;color:var(--ink)' },
+          'Рабочих ключей: <b>' + good + ' из ' + (d.keys || []).length + '</b>. Нерабочий ключ удалите из ELEVENLABS_API_KEYS — ' +
+          'но только в конце списка или вместе с пересозданием голосов, чтобы не сбились номера аккаунтов.'), out.firstChild);
+        loadQuota();
+      }).catch(function (e) {
+        out.innerHTML = '<p class="note" style="color:var(--onair)">' + esc(e.message) + '</p>';
+      }).then(function () { go.disabled = false; go.textContent = 'Проверить снова'; });
+    }
+    go.onclick = run;
+  }
+
   function openSettings(scrollToAcc) {
     var p = S.proj, st = p.settings;
     var box = h('div');
@@ -2032,7 +2081,10 @@
         });
         var need = needsWork().chars;
         if (need) acc.appendChild(h('p', { class: 'note' }, 'Для этого проекта нужно ещё ' + nf(need) + ' симв.'));
-        acc.appendChild(h('button', { class: 'btn sm', type: 'button', onclick: function () { S.token = ''; S.quota = null; S.voices = null; lsSet('ozv.token', ''); paintQuota(); s.close(); toast('Вы вышли'); } }, 'Выйти'));
+        var accBtns = h('div', { class: 'row' });
+        accBtns.appendChild(h('button', { class: 'btn sm primary', type: 'button', onclick: function () { openKeyCheck(); } }, 'Проверить ключи'));
+        accBtns.appendChild(h('button', { class: 'btn sm', type: 'button', onclick: function () { S.token = ''; S.quota = null; S.voices = null; lsSet('ozv.token', ''); paintQuota(); s.close(); toast('Вы вышли'); } }, 'Выйти'));
+        acc.appendChild(accBtns);
       };
       paintAcc();
       loadQuota().then(paintAcc);
