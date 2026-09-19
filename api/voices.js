@@ -1,6 +1,6 @@
 // api/voices.js — голоса ElevenLabs: список своих и поиск по общей библиотеке.
 //
-// GET  ?action=mine&keyIndex=0        → { voices: [{ id, name, category, labels }] }
+// GET  ?action=mine&keyIndex=0|all    → { voices: [{ id, name, category, labels, langs, preview, accounts }], errors }
 // GET  ?action=library&search=&gender=&language=de&page=0
 //                                     → { voices: [{ id, ownerId, name, accent, useCase, gender, language, preview, added }], hasMore }
 // POST { token, action:'add', voiceId, ownerId, name }
@@ -48,18 +48,47 @@ export default async function handler(req, res) {
   const action = req.method === 'POST' ? body.action : q.action;
 
   try {
-    // ── свои голоса выбранного аккаунта ──
+    // ── свои голоса: одного аккаунта (keyIndex=N) или всех сразу (keyIndex=all) ──
+    // Голоса у каждого аккаунта свои: немецкие из библиотеки могут быть добавлены
+    // только в часть аккаунтов. В режиме all список сливается, у голоса — номера аккаунтов.
     if (action === 'mine') {
-      const i = Math.min(keys.length - 1, Math.max(0, parseInt(q.keyIndex, 10) || 0));
-      const d = await el(keys[i], '/v1/voices');
-      const voices = (d.voices || []).map((v) => ({
-        id: v.voice_id,
-        name: v.name,
-        category: v.category || 'premade',     // premade | cloned | professional | generated
-        labels: v.labels || {},
-        preview: v.preview_url || '',
+      const all = q.keyIndex === 'all';
+      const idxs = all ? keys.map((_, i) => i) : [Math.min(keys.length - 1, Math.max(0, parseInt(q.keyIndex, 10) || 0))];
+      const byId = new Map();
+      const errors = [];
+      await Promise.all(idxs.map(async (i) => {
+        try {
+          const d = await el(keys[i], '/v1/voices');
+          (d.voices || []).forEach((v) => {
+            let cur = byId.get(v.voice_id);
+            if (!cur) {
+              const labels = v.labels || {};
+              const langs = new Set();
+              if (labels.language) langs.add(String(labels.language).toLowerCase());
+              (v.verified_languages || []).forEach((l) => l && l.language && langs.add(String(l.language).toLowerCase()));
+              if (v.fine_tuning && v.fine_tuning.language) langs.add(String(v.fine_tuning.language).toLowerCase());
+              cur = {
+                id: v.voice_id,
+                name: v.name,
+                category: v.category || 'premade',   // premade | cloned | professional | generated
+                labels,
+                description: v.description || '',
+                langs: [...langs],
+                preview: v.preview_url || '',
+                accounts: [],
+              };
+              byId.set(v.voice_id, cur);
+            }
+            cur.accounts.push(i);
+          });
+        } catch (e) {
+          errors.push({ index: i, error: e.message });
+        }
       }));
-      return res.json({ voices, keyIndex: i });
+      if (!byId.size && errors.length) throw new Error(errors[0].error);
+      const voices = [...byId.values()];
+      voices.forEach((v) => v.accounts.sort((a, b) => a - b));
+      return res.json({ voices, errors, keyIndex: all ? 'all' : idxs[0] });
     }
 
     // ── поиск по общей библиотеке ──

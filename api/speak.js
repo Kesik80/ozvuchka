@@ -88,7 +88,9 @@ export default async function handler(req, res) {
       if (!r.ok) {
         const details = (await r.text()).slice(0, 400);
         if (r.status === 402 || /paid_plan_required/.test(details)) {
-          return res.status(402).json({ error: 'Этот голос доступен только на платном плане ElevenLabs', code: 'paid_voice', details });
+          // голос из библиотеки на бесплатном аккаунте — вдруг следующий аккаунт платный
+          lastError = { error: 'Голос из библиотеки: на бесплатном плане ElevenLabs он через API не работает', code: 'paid_voice', details };
+          continue;
         }
         if (/voice_not_found/.test(details) && order.length > 1) {
           // голос добавлен не во все аккаунты — пробуем следующий
@@ -110,5 +112,6 @@ export default async function handler(req, res) {
       lastError = { error: e.message };
     }
   }
-  return res.status(502).json(Object.assign({ error: 'Символы кончились на всех аккаунтах', code: 'credits' }, lastError));
+  const status = lastError && lastError.code === 'paid_voice' ? 402 : 502;
+  return res.status(status).json(Object.assign({ error: 'Символы кончились на всех аккаунтах', code: 'credits' }, lastError));
 }

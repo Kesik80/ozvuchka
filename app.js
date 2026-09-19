@@ -4,7 +4,7 @@
  * Сервер (/api/*) нужен только для ElevenLabs: ключи там, в браузер они не попадают.
  *
  * Проект: { id, v, title, created, updated,
- *           settings: { gap, format, hideTags, tapMode, showTr },
+ *           settings: { gap, repeat, format, hideTags, tapMode, showTr },
  *           roles:  [{ id, name, color, narrator, voiceId, voiceName, preview, model,
  *                      stability, similarity, style, speed, mood }],
  *           blocks: [{ id, type:'line'|'heading', roleId, html, tr, mood,
@@ -139,7 +139,7 @@
   function newProject(title) {
     return {
       id: uid(), v: 1, title: title || 'Без названия', created: Date.now(), updated: Date.now(),
-      settings: { gap: 450, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true },
+      settings: { gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true },
       roles: [newRole('Рассказчик', 6, { narrator: true })],
       blocks: []
     };
@@ -279,7 +279,7 @@
     },
     src: function (id) { var b = blockById(id); return b && b.audio ? audioUrl(b.audio.key) : null; },
     el: function (id) { return document.querySelector('#doc [data-id="' + id + '"]'); },
-    gap: function () { return S.proj.settings.gap; },
+    gap: function (it) { return window.OzGap(S.proj.settings, it && it.dur); },
     title: function () { return S.proj.title; },
     onChange: function () { if (bar) bar.paint(); paintPlayButtons(); },
     onTick: function () { if (bar) bar.tick(); },
@@ -325,6 +325,41 @@
         '</span>'));
     });
     el.appendChild(h('button', { class: 'chip add', type: 'button', onclick: addRole }, '+ Роль'));
+    var spare = unusedRoles();
+    if (spare.length) {
+      el.appendChild(h('button', { class: 'chip add', type: 'button', title: spare.map(function (r) { return r.name; }).join(', '), onclick: function () {
+        var n = removeUnusedRoles();
+        toast('Убрано: ' + n + ' ' + plural(n, 'роль', 'роли', 'ролей'), {
+          action: 'Вернуть', onAction: function () { S.proj.roles = S.proj.roles.concat(spare); renderAll(); touch(); }
+        });
+      } }, 'Убрать лишние (' + spare.length + ')'));
+    }
+  }
+
+  // роли без реплик; одну всегда оставляем
+  function unusedRoles() {
+    var used = {};
+    S.proj.blocks.forEach(function (b) { if (isLine(b)) used[b.roleId] = 1; });
+    var spare = S.proj.roles.filter(function (r) { return !used[r.id]; });
+    if (spare.length === S.proj.roles.length) spare = spare.slice(1);
+    return spare;
+  }
+  function removeUnusedRoles() {
+    var spare = unusedRoles(), ids = {};
+    spare.forEach(function (r) { ids[r.id] = 1; });
+    S.proj.roles = S.proj.roles.filter(function (r) { return !ids[r.id]; });
+    renderAll(); touch();
+    return spare.length;
+  }
+  function deleteRole(r) {
+    if (S.proj.roles.length < 2) { toast('Последнюю роль удалить нельзя'); return false; }
+    var used = S.proj.blocks.filter(function (b) { return b.roleId === r.id; }).length;
+    var rest = S.proj.roles.filter(function (x) { return x.id !== r.id; });
+    if (used && !confirm('У роли «' + r.name + '» ' + used + ' ' + plural(used, 'реплика', 'реплики', 'реплик') + '. Они перейдут к «' + rest[0].name + '». Удалить роль?')) return false;
+    S.proj.roles = rest;
+    S.proj.blocks.forEach(function (b) { if (b.roleId === r.id) b.roleId = rest[0].id; });
+    renderAll(); touch();
+    return true;
   }
 
   function renderDoc() {
@@ -458,6 +493,17 @@
     });
   }
 
+  // аккаунт для озвучки: тот, где этот голос есть и символов больше всего
+  function keyFor(r) {
+    var best = S.quota ? S.quota.best : 0;
+    var accs = r.voiceAccounts;
+    if (!accs || !accs.length) return best;
+    if (accs.indexOf(best) >= 0) return best;
+    var left = {};
+    ((S.quota && S.quota.accounts) || []).forEach(function (a) { left[a.index] = a.error ? -1 : a.left; });
+    return accs.slice().sort(function (a, b) { return (left[b] || 0) - (left[a] || 0); })[0];
+  }
+
   function speakOne(b) {
     var r = roleById(b.roleId);
     var text = ttsText(b);
@@ -473,7 +519,7 @@
         token: S.token, text: text, voiceId: r.voiceId, modelId: r.model,
         voiceSettings: { stability: r.stability, similarity_boost: r.similarity, style: r.style, speed: r.speed, use_speaker_boost: true },
         previousText: nb.prev, nextText: nb.next,
-        keyIndex: S.quota ? S.quota.best : 0,
+        keyIndex: keyFor(r),
         format: S.proj.settings.format
       })
     }).then(function (res) {
@@ -790,6 +836,7 @@
     o = o || {};
     var d = h('dialog', { class: 'sheet' + (o.wide ? ' wide' : '') });
     var head = h('div', { class: 'sh-head' }, '<h2>' + esc(title) + '</h2>');
+    (o.tools || []).forEach(function (t) { head.appendChild(t); });
     var x = h('button', { class: 'ib', type: 'button', 'aria-label': 'Закрыть', onclick: function () { d.close(); } }, ICON.close);
     head.appendChild(x);
     var bd = h('div', { class: 'sh-body' });
@@ -917,7 +964,16 @@
     var r = newRole('Роль ' + n, 0, { color: free[0] || COLORS[S.proj.roles.length % COLORS.length] });
     S.proj.roles.push(r);
     renderCast(); touch();
-    openRole(r.id, { isNew: true, onClose: function () { if (typeof cb === 'function') cb(r); } });
+    openRole(r.id, { isNew: true, onClose: function () {
+      // роль создали и закрыли, не выбрав голос и не дав ей реплик — не оставляем мусор
+      var inUse = S.proj.blocks.some(function (b) { return b.roleId === r.id; });
+      if (!r.voiceId && !inUse && typeof cb !== 'function' && S.proj.roles.indexOf(r) >= 0 && S.proj.roles.length > 1) {
+        S.proj.roles = S.proj.roles.filter(function (x) { return x !== r; });
+        renderCast(); touch();
+        return;
+      }
+      if (typeof cb === 'function') cb(r);
+    } });
   }
 
   function openRole(id, o) {
@@ -1012,19 +1068,15 @@
     }
     paintTune();
 
-    var used = S.proj.blocks.filter(function (b) { return b.roleId === r.id; }).length;
     if (S.proj.roles.length > 1) {
       box.appendChild(h('div', { class: 'mt' }));
-      box.appendChild(h('button', { class: 'btn ghost danger block', type: 'button', onclick: function () {
-        if (used && !confirm('У роли ' + used + ' ' + plural(used, 'реплика', 'реплики', 'реплик') + '. Они перейдут к «' + S.proj.roles.filter(function (x) { return x.id !== r.id; })[0].name + '». Удалить роль?')) return;
-        S.proj.roles = S.proj.roles.filter(function (x) { return x.id !== r.id; });
-        var to = S.proj.roles[0].id;
-        S.proj.blocks.forEach(function (b) { if (b.roleId === r.id) b.roleId = to; });
-        s.close(); renderAll(); touch();
-      } }, 'Удалить роль'));
+      box.appendChild(h('button', { class: 'btn danger block', type: 'button', onclick: function () { if (deleteRole(r)) s.close(); } }, ICON.trash.replace('<svg', '<svg width="18" height="18" fill="currentColor"') + 'Удалить роль'));
     }
 
-    s = sheet(r.name, box, { onClose: function () { stopPreview(); if (o.onClose) o.onClose(); } });
+    s = sheet(r.name, box, {
+      onClose: function () { stopPreview(); if (o.onClose) o.onClose(); },
+      tools: S.proj.roles.length > 1 ? [h('button', { class: 'ib', type: 'button', title: 'Удалить роль', 'aria-label': 'Удалить роль', style: 'color:var(--onair)', onclick: function () { if (deleteRole(r)) s.close(); } }, ICON.trash)] : null
+    });
   }
 
   // ── голоса ─────────────────────────────────────────────
@@ -1053,6 +1105,12 @@
       });
   }
 
+  function isGermanVoice(v) {
+    var l = v.labels || {};
+    if ((v.langs || []).indexOf('de') >= 0) return true;
+    return /german|deutsch|hochdeutsch|bayer|bavar|österr|austria|schweiz|swiss/i.test([v.name, l.accent, l.language, l.description, l.descriptive, v.description].join(' '));
+  }
+
   function openVoices(role, done) {
     if (!S.token) { openLogin(function () { openVoices(role, done); }); return; }
     var box = h('div');
@@ -1074,6 +1132,7 @@
 
     function choose(v) {
       role.voiceId = v.id; role.voiceName = v.name.split(' - ')[0].trim(); role.preview = v.preview || '';
+      role.voiceAccounts = v.accounts || null;
       stopPreview(); s.close(); done();
     }
     function row(v, lib) {
@@ -1081,7 +1140,9 @@
       var about = lib ? [v.gender, v.accent, v.useCase, v.descriptive].filter(Boolean).join(' · ')
         : [lab.gender, lab.age, lab.accent, lab.descriptive || lab.description, lab.use_case].filter(Boolean).join(' · ');
       var el = h('div', { class: 'voice-row' + (v.id === role.voiceId ? ' on' : '') });
-      el.innerHTML = '<div class="li-t"><b>' + esc(v.name.split(' - ')[0]) + '</b><small>' + esc(about || (v.category === 'premade' ? 'стандартный' : v.category || '')) + '</small></div>';
+      var nKeys = S.quota && S.quota.accounts ? S.quota.accounts.length : 1;
+      var where = !lib && v.accounts && nKeys > 1 && v.accounts.length < nKeys ? ' · только в акк. ' + v.accounts.map(function (i) { return i + 1; }).join(', ') : '';
+      el.innerHTML = '<div class="li-t"><b>' + esc(v.name.split(' - ')[0]) + '</b><small>' + esc((about || (v.category === 'premade' ? 'стандартный' : v.category || '')) + where) + '</small></div>';
       if (v.preview) {
         var p = h('button', { class: 'pv', type: 'button', 'aria-label': 'Прослушать' }, ICON.play);
         p.onclick = function () { previewPlay(v.preview, p); };
@@ -1093,9 +1154,10 @@
         pick.disabled = true; pick.innerHTML = '<span class="spin"></span>';
         api('/api/voices', { method: 'POST', body: { action: 'add', voiceId: v.id, ownerId: v.ownerId, name: v.name } }).then(function (d) {
           if (!d.ok) throw new Error('Не добавился');
-          var id = (d.results || []).filter(function (x) { return x.id; }).map(function (x) { return x.id; })[0] || v.id;
+          var okRes = (d.results || []).filter(function (x) { return x.ok; });
+          var id = okRes.filter(function (x) { return x.id; }).map(function (x) { return x.id; })[0] || v.id;
           S.voices = null;               // список своих голосов изменился
-          choose({ id: id, name: v.name, preview: v.preview });
+          choose({ id: id, name: v.name, preview: v.preview, accounts: okRes.map(function (x) { return x.keyIndex; }) });
           toast('Голос добавлен в аккаунт' + (d.total > 1 ? 'ы (' + d.added + ' из ' + d.total + ')' : ''));
         }).catch(function (e) { pick.disabled = false; pick.textContent = 'Добавить'; toast(e.message, { err: true }); });
       };
@@ -1106,16 +1168,27 @@
       more.hidden = true;
       if (S.voices) return paintMine();
       list.innerHTML = '<p class="center muted"><span class="spin"></span> Загружаю голоса…</p>';
-      api('/api/voices?action=mine&keyIndex=' + (S.quota ? S.quota.best : 0)).then(function (d) { S.voices = d.voices || []; paintMine(); })
+      api('/api/voices?action=mine&keyIndex=all').then(function (d) { S.voices = d.voices || []; paintMine(); })
         .catch(function (e) { list.innerHTML = '<p class="muted">' + esc(e.message) + '</p>'; if (e.code === 'auth') { s.close(); openLogin(function () { openVoices(role, done); }); } });
     }
     function paintMine() {
       list.innerHTML = '';
-      var own = S.voices.filter(function (v) { return v.category !== 'premade'; });
-      var std = S.voices.filter(function (v) { return v.category === 'premade'; });
-      if (own.length) { list.appendChild(h('h3', null, 'Добавленные')); own.forEach(function (v) { list.appendChild(row(v)); }); }
-      list.appendChild(h('h3', null, 'Стандартные'));
-      std.forEach(function (v) { list.appendChild(row(v)); });
+      var de = S.voices.filter(isGermanVoice);
+      var own = S.voices.filter(function (v) { return v.category !== 'premade' && !isGermanVoice(v); });
+      var std = S.voices.filter(function (v) { return v.category === 'premade' && !isGermanVoice(v); });
+      var allFree = S.quota && (S.quota.accounts || []).every(function (a) { return a.error || /free/i.test(a.tier || ''); });
+      list.appendChild(h('h3', null, 'Немецкие'));
+      if (de.length) de.forEach(function (v) { list.appendChild(row(v)); });
+      else list.appendChild(h('p', { class: 'note', style: 'margin:0 0 6px' }, 'В аккаунтах пока нет немецких голосов. Найдите их во вкладке «Библиотека» — язык там уже стоит «Немецкий».'));
+      if (allFree && (de.some(function (v) { return v.category !== 'premade'; }) || own.length)) {
+        list.appendChild(h('p', { class: 'note', style: 'color:var(--warn)' }, 'Голоса из библиотеки на бесплатном плане ElevenLabs через API не озвучивают (ошибка 402). Стандартные работают везде и тоже говорят по-немецки.'));
+      }
+      if (own.length) { list.appendChild(h('h3', null, 'Другие добавленные')); own.forEach(function (v) { list.appendChild(row(v)); }); }
+      if (std.length) {
+        list.appendChild(h('h3', null, 'Стандартные'));
+        list.appendChild(h('p', { class: 'note', style: 'margin:0 0 6px' }, 'Говорят на всех языках, по-немецки тоже — «american» в описании означает только акцент в английском.'));
+        std.forEach(function (v) { list.appendChild(row(v)); });
+      }
     }
     function loadLib(reset) {
       if (reset) { page = 0; list.innerHTML = ''; }
@@ -1232,7 +1305,7 @@
     });
   }
   function migrate(p) {
-    p.settings = Object.assign({ gap: 450, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true }, p.settings || {});
+    p.settings = Object.assign({ gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true }, p.settings || {});
     if (!p.roles || !p.roles.length) p.roles = [newRole('Рассказчик', 6, { narrator: true })];
     p.blocks = p.blocks || [];
   }
@@ -1464,7 +1537,7 @@
       withAudio.forEach(function (b, i) { if (res[i + 2]) audio[b.id] = { d: res[i + 2], dur: b.audio.dur, sig: b.audio.src === 'tts' ? b.audio.sig : '' }; });
       var data = {
         v: 1, app: 'ozvuchka', title: p.title,
-        settings: { gap: p.settings.gap, hideTags: p.settings.hideTags, tapMode: p.settings.tapMode },
+        settings: { gap: p.settings.gap, repeat: p.settings.repeat, hideTags: p.settings.hideTags, tapMode: p.settings.tapMode },
         roles: p.roles.map(function (r) { var c = Object.assign({}, r); return c; }),
         blocks: p.blocks.map(function (b) { return { id: b.id, type: b.type, roleId: b.roleId, html: b.html, tr: b.tr, mood: b.mood }; }),
         audio: audio
@@ -1476,7 +1549,7 @@
         "var roles={};D.roles.forEach(function(r){roles[r.id]=r});var urls={};" +
         "function src(id){if(urls[id])return urls[id];var s=D.audio[id].d,b=atob(s.split(',')[1]),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return urls[id]=URL.createObjectURL(new Blob([u],{type:'audio/mpeg'}))}" +
         "var items=D.blocks.filter(function(b){return b.type!=='heading'&&D.audio[b.id]}).map(function(b){var r=roles[b.roleId]||{};return{id:b.id,dur:D.audio[b.id].dur,name:r.narrator?'':r.name,color:r.color,text:OzText.plain(OzText.hideTags(b.html))}});" +
-        "var bar;var P=new OzPlayer({items:function(){return items},src:src,el:function(id){return app.querySelector('[data-id=\"'+id+'\"]')},gap:function(){return D.settings.gap||400},title:function(){return D.title},onChange:function(){bar&&bar.paint()},onTick:function(){bar&&bar.tick()}});" +
+        "var bar;var P=new OzPlayer({items:function(){return items},src:src,el:function(id){return app.querySelector('[data-id=\"'+id+'\"]')},gap:function(it){return OzGap(D.settings,it&&it.dur)},title:function(){return D.title},onChange:function(){bar&&bar.paint()},onTick:function(){bar&&bar.tick()}});" +
         "bar=OzBar(document.body,P,{translation:D.blocks.some(function(b){return b.tr})});P.refresh();" +
         "var one=D.settings.tapMode!=='from';app.addEventListener('click',function(e){var l=e.target.closest('.oz-line');if(l&&!l.classList.contains('no-audio'))P.playId(l.dataset.id,one)});" +
         "app.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.classList.contains('oz-line'))P.playId(e.target.dataset.id,one)});" +
@@ -1494,10 +1567,147 @@
     });
   }
 
+  // ── MP3 целиком: реплики + настоящая тишина между ними ──
+  // Склеиваем на уровне MP3-кадров: у каждого клипа убираем ID3 и служебный кадр Xing/Info
+  // (иначе плеер считает длину файла по первому клипу), а паузу собираем из «пустых» кадров
+  // с тем же заголовком, что у соседнего звука. Пустой кадр Layer III (нулевая побочная
+  // информация, main_data_begin = 0) любой декодер играет как тишину — перекодировать ничего не нужно.
+  var MP3 = (function () {
+    var BR = {                                   // кбит/с по индексу
+      1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+      2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+    };
+    var SR = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+
+    function header(u, i) {
+      if (i + 4 > u.length || u[i] !== 0xFF || (u[i + 1] & 0xE0) !== 0xE0) return null;
+      var ver = (u[i + 1] >> 3) & 3, layer = (u[i + 1] >> 1) & 3;
+      var bri = u[i + 2] >> 4, sri = (u[i + 2] >> 2) & 3, pad = (u[i + 2] >> 1) & 1;
+      if (ver === 1 || layer !== 1 || bri === 0 || bri === 15 || sri === 3) return null;   // только Layer III
+      var mpeg1 = ver === 3;
+      var br = BR[mpeg1 ? 1 : 2][bri] * 1000, sr = SR[ver][sri];
+      var mono = (u[i + 3] >> 6) === 3;
+      return {
+        len: Math.floor((mpeg1 ? 144 : 72) * br / sr) + pad,
+        spf: mpeg1 ? 1152 : 576, sr: sr,
+        side: mpeg1 ? (mono ? 17 : 32) : (mono ? 9 : 17),
+        crc: !(u[i + 1] & 1)
+      };
+    }
+
+    // → { frames: [Uint8Array…], first: байты заголовка, h } или null, если это не MP3
+    function parse(buf) {
+      var u = new Uint8Array(buf), i = 0, frames = [], first = null, fh = null;
+      if (u[0] === 0x49 && u[1] === 0x44 && u[2] === 0x33) {              // ID3v2
+        i = 10 + ((u[6] & 127) << 21 | (u[7] & 127) << 14 | (u[8] & 127) << 7 | (u[9] & 127));
+        if (u[5] & 0x10) i += 10;
+      }
+      var miss = 0;
+      while (i < u.length) {
+        var hd = header(u, i);
+        if (!hd || hd.len < 21 || i + hd.len > u.length) {
+          if (!frames.length && miss < 8192) { i++; miss++; continue; }        // мусор перед первым кадром
+          break;                                                              // ID3v1 «TAG» или хвост
+        }
+        var f = u.subarray(i, i + hd.len);
+        var off = 4 + (hd.crc ? 2 : 0) + hd.side;
+        var tag = String.fromCharCode(f[off], f[off + 1], f[off + 2], f[off + 3]);
+        var vbri = String.fromCharCode(f[36], f[37], f[38], f[39]);
+        if (!frames.length && (tag === 'Xing' || tag === 'Info' || vbri === 'VBRI')) { i += hd.len; continue; }
+        if (!first) { first = f.slice(0, 4); fh = hd; }
+        frames.push(f);
+        i += hd.len;
+      }
+      return frames.length > 2 ? { frames: frames, first: first, h: fh } : null;
+    }
+
+    // пустой кадр с тем же форматом: без CRC, без добавочного байта, всё остальное — нули
+    function silentFrame(first, hd) {
+      var hb = new Uint8Array(first);
+      hb[1] |= 1;                    // protection_bit = 1 → без CRC
+      hb[2] &= ~2;                   // padding = 0
+      var len = hd.len - (((first[2] >> 1) & 1));
+      var f = new Uint8Array(len);
+      f.set(hb, 0);
+      return f;
+    }
+    function silence(first, hd, ms) {
+      var n = Math.round(ms / 1000 * hd.sr / hd.spf);
+      var f = silentFrame(first, hd), out = [];
+      for (var k = 0; k < n; k++) out.push(f);
+      return out;
+    }
+    // Служебный кадр Xing в начале: число кадров и байт — плеер покажет верную длину,
+    // даже если у клипов разный битрейт
+    function xing(first, hd, frames, bytes) {
+      var f = silentFrame(first, hd);
+      var off = 4 + hd.side;
+      var put = function (o, v) { f[o] = v >>> 24 & 255; f[o + 1] = v >>> 16 & 255; f[o + 2] = v >>> 8 & 255; f[o + 3] = v & 255; };
+      f[off] = 88; f[off + 1] = 105; f[off + 2] = 110; f[off + 3] = 103;    // 'Xing'
+      put(off + 4, 3);                                                       // есть: кадры + байты
+      put(off + 8, frames);
+      put(off + 12, bytes + f.length);
+      return f;
+    }
+    function sameFormat(a, b) { return a.h.sr === b.h.sr && a.h.side === b.h.side; }
+    return { parse: parse, silence: silence, xing: xing, sameFormat: sameFormat };
+  })();
+
+  // Запасной путь для «своих» файлов не в MP3 (m4a, wav…): WAV через Web Audio
+  function buildWav(blobs, gaps) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ctx = new AC({ sampleRate: 44100 });
+    return Promise.all(blobs.map(function (b) { return b.arrayBuffer().then(function (ab) { return ctx.decodeAudioData(ab); }); }))
+      .then(function (bufs) {
+        var sr = 44100, total = 0;
+        bufs.forEach(function (b, i) { total += b.length + (i < bufs.length - 1 ? Math.round(gaps[i] / 1000 * sr) : 0); });
+        var pcm = new Int16Array(total), pos = 0;
+        bufs.forEach(function (b, i) {
+          var chs = [];
+          for (var c = 0; c < b.numberOfChannels; c++) chs.push(b.getChannelData(c));
+          for (var k = 0; k < b.length; k++) {
+            var v = 0;
+            for (c = 0; c < chs.length; c++) v += chs[c][k];
+            v = Math.max(-1, Math.min(1, v / chs.length));
+            pcm[pos++] = v < 0 ? v * 0x8000 : v * 0x7FFF;
+          }
+          if (i < bufs.length - 1) pos += Math.round(gaps[i] / 1000 * sr);
+        });
+        if (ctx.close) ctx.close();
+        var head = new DataView(new ArrayBuffer(44));
+        var w = function (o, str) { for (var k = 0; k < 4; k++) head.setUint8(o + k, str.charCodeAt(k)); };
+        w(0, 'RIFF'); head.setUint32(4, 36 + pcm.byteLength, true); w(8, 'WAVE');
+        w(12, 'fmt '); head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true);
+        head.setUint32(24, sr, true); head.setUint32(28, sr * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true);
+        w(36, 'data'); head.setUint32(40, pcm.byteLength, true);
+        return { blob: new Blob([head.buffer, pcm.buffer], { type: 'audio/wav' }), ext: 'wav' };
+      });
+  }
+
   function buildMp3() {
     var bs = S.proj.blocks.filter(function (b) { return isLine(b) && b.audio; });
+    var gaps = bs.map(function (b) { return window.OzGap(S.proj.settings, b.audio.dur); });
     return Promise.all(bs.map(function (b) { return idb.get('audio', b.audio.key); })).then(function (blobs) {
-      return new Blob(blobs.filter(Boolean), { type: 'audio/mpeg' });
+      var ok = [], okGaps = [];
+      blobs.forEach(function (b, i) { if (b) { ok.push(b); okGaps.push(gaps[i]); } });
+      return Promise.all(ok.map(function (b) { return b.arrayBuffer(); })).then(function (bufs) {
+        var parsed = bufs.map(MP3.parse);
+        // не-MP3 или разная частота/каналы — такой поток не каждый плеер выдержит, собираем WAV
+        if (parsed.some(function (x) { return !x || !MP3.sameFormat(x, parsed[0]); })) return buildWav(ok, okGaps);
+        var parts = [];
+        parsed.forEach(function (x, i) {
+          parts = parts.concat(x.frames);
+          if (i < parsed.length - 1) {
+            // тишина в формате следующего клипа — на стыке не меняется частота
+            var nx = parsed[i + 1];
+            parts = parts.concat(MP3.silence(nx.first, nx.h, okGaps[i]));
+          }
+        });
+        var bytes = 0;
+        parts.forEach(function (f) { bytes += f.length; });
+        parts.unshift(MP3.xing(parsed[0].first, parsed[0].h, parts.length, bytes));
+        return { blob: new Blob(parts, { type: 'audio/mpeg' }), ext: 'mp3' };
+      });
     });
   }
 
@@ -1541,9 +1751,12 @@
     item('Страница со звуком (.html)', 'Работает без интернета: текст, плеер, нажатие на реплику. Её же можно открыть здесь снова для правки.', function () {
       return buildPage().then(function (blob) { deliver(slug(p.title) + '.html', blob, 'text/html'); });
     });
-    item('Весь звук одним MP3', 'Все реплики подряд — для прослушивания в дороге', function () {
+    item('Весь звук одним MP3', 'Все реплики подряд с паузами из настроек — для прослушивания в дороге', function () {
       if (!withA.length) return Promise.reject(new Error('Нет озвученных реплик'));
-      return buildMp3().then(function (blob) { deliver(slug(p.title) + '.mp3', blob, 'audio/mpeg'); });
+      return buildMp3().then(function (r) {
+        if (r.ext === 'wav') toast('Среди звуков есть не-MP3 — собрал WAV: он больше, но паузы на месте');
+        deliver(slug(p.title) + '.' + r.ext, r.blob, r.ext === 'wav' ? 'audio/wav' : 'audio/mpeg');
+      });
     });
     item('Текст (.txt)', 'В формате «Имя: текст // перевод» — импортируется обратно', function () {
       return Promise.resolve(deliver(slug(p.title) + '.txt', buildTxt(), 'text/plain'));
@@ -1605,6 +1818,10 @@
     gi.value = st.gap; go.textContent = (st.gap / 1000).toFixed(2).replace('.', ',') + ' с';
     gi.oninput = function () { st.gap = +gi.value; go.textContent = (st.gap / 1000).toFixed(2).replace('.', ',') + ' с'; touch(); };
     box.appendChild(gap);
+
+    box.appendChild(h('h3', null, 'Время на повтор после реплики'));
+    box.appendChild(segOf([[0, 'Нет'], [1, '1×'], [1.5, '1,5×'], [2, '2×']], +st.repeat || 0, function (v) { st.repeat = v; touch(); }));
+    box.appendChild(h('p', { class: 'note' }, 'Тишина длиной в реплику (×1, ×1,5, ×2) — чтобы успеть повторить вслух. Работает в плеере, в скачанной странице и в MP3.'));
 
     box.appendChild(h('h3', null, 'Качество новой озвучки'));
     box.appendChild(segOf([['mp3_44100_64', '64 кбит/с — легче'], ['mp3_44100_128', '128 кбит/с — чище']], st.format, function (v) { st.format = v; renderDoc(); touch(); }));
