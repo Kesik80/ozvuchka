@@ -42,12 +42,22 @@ export default async function handler(req, res) {
   if (!VOICE_ID.test(String(b.voiceId || ''))) {
     return res.status(400).json({ error: 'Не выбран голос', code: 'no_voice' });
   }
+  // карта «аккаунт → id голоса»: у созданных голосов id в каждом аккаунте свой
+  const voiceMap = {};
+  if (b.voiceMap && typeof b.voiceMap === 'object') {
+    for (const k of Object.keys(b.voiceMap)) {
+      if (/^\d+$/.test(k) && VOICE_ID.test(String(b.voiceMap[k]))) voiceMap[k] = String(b.voiceMap[k]);
+    }
+  }
+  const hasMap = Object.keys(voiceMap).length > 0;
 
   const keys = getKeys();
   if (!keys.length) return res.status(500).json({ error: 'ELEVENLABS_API_KEY не задан в Vercel' });
 
   const start = Number.isInteger(b.keyIndex) && b.keyIndex >= 0 && b.keyIndex < keys.length ? b.keyIndex : 0;
-  const order = keys.map((_, i) => (start + i) % keys.length);
+  // с картой пробуем только аккаунты, где голос есть
+  const order = keys.map((_, i) => (start + i) % keys.length).filter((i) => !hasMap || voiceMap[i]);
+  if (!order.length) return res.status(400).json({ error: 'Этого голоса нет ни в одном аккаунте', code: 'no_voice' });
 
   const model = ALLOWED_MODELS.includes(b.modelId) ? b.modelId : 'eleven_multilingual_v2';
   const format = ALLOWED_FORMATS.includes(b.format) ? b.format : 'mp3_44100_64';
@@ -78,7 +88,7 @@ export default async function handler(req, res) {
   for (const idx of order) {
     try {
       const r = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${b.voiceId}?output_format=${format}`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceMap[idx] || b.voiceId}?output_format=${format}`,
         {
           method: 'POST',
           headers: { Accept: 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': keys[idx] },

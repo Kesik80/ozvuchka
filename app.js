@@ -516,7 +516,7 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        token: S.token, text: text, voiceId: r.voiceId, modelId: r.model,
+        token: S.token, text: text, voiceId: r.voiceId, voiceMap: r.voiceMap || null, modelId: r.model,
         voiceSettings: { stability: r.stability, similarity_boost: r.similarity, style: r.style, speed: r.speed, use_speaker_boost: true },
         previousText: nb.prev, nextText: nb.next,
         keyIndex: keyFor(r),
@@ -1111,12 +1111,180 @@
     return /german|deutsch|hochdeutsch|bayer|bavar|österr|austria|schweiz|swiss/i.test([v.name, l.accent, l.language, l.description, l.descriptive, v.description].join(' '));
   }
 
+  // ── создание голоса по описанию (Voice Design) ──────────
+  var DESIGN_WHO = { female: ['woman', 'Женщина'], male: ['man', 'Мужчина'] };
+  var DESIGN_AGE = { young: ['young adult, around 25 years old', 'Молодой'], mid: ['middle-aged, around 40 years old', 'Средний'], old: ['older, around 65 years old', 'Пожилой'] };
+  var DESIGN_MOOD = {
+    warm: ['warm and friendly tone', 'Тёплый'],
+    calm: ['calm, relaxed and unhurried delivery', 'Спокойный'],
+    lively: ['lively, upbeat and energetic delivery', 'Бодрый'],
+    narrator: ['clear, engaging storytelling narrator voice', 'Рассказчик'],
+    news: ['precise, neutral news-anchor delivery', 'Диктор'],
+    teacher: ['patient language teacher who speaks slowly and very clearly', 'Учитель']
+  };
+  var DESIGN_TEXT = 'Hallo! Schön, dass du da bist. Heute lernen wir zusammen ein paar neue Wörter. ' +
+    'Hör gut zu und sprich einfach nach – Schritt für Schritt, ganz ohne Stress.';
+
+  function designPanel(role, choose) {
+    var st = lsGet('ozv.design', { who: 'female', age: 'young', mood: 'warm', model: 'eleven_multilingual_ttv_v2' });
+    var box = h('div');
+    var dirty = false;
+    var urls = [];
+    box.appendChild(h('p', { class: 'note', style: 'margin:0 0 4px' },
+      'Свой голос по описанию. Это голос вашего аккаунта, а не из библиотеки, поэтому озвучивает и на бесплатном плане. ' +
+      'Каждый такой голос занимает место в аккаунте — на бесплатном их немного.'));
+
+    function seg(map, key, label) {
+      box.appendChild(h('h3', null, label));
+      var el = h('div', { class: 'seg' });
+      Object.keys(map).forEach(function (k) {
+        el.appendChild(h('button', { type: 'button', class: st[key] === k ? 'on' : '', onclick: function () {
+          st[key] = k; lsSet('ozv.design', st);
+          el.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b === this); }, this);
+          if (!dirty) desc.value = buildDesc();
+          if (key === 'who' && !nameTouched) name.value = defaultName();
+        } }, map[k][1]));
+      });
+      box.appendChild(el);
+    }
+    seg(DESIGN_WHO, 'who', 'Кто');
+    seg(DESIGN_AGE, 'age', 'Возраст');
+
+    box.appendChild(h('h3', null, 'Характер'));
+    var moods = h('div', { class: 'chips' });
+    Object.keys(DESIGN_MOOD).forEach(function (k) {
+      moods.appendChild(h('button', { type: 'button', class: st.mood === k ? 'on' : '', onclick: function () {
+        st.mood = k; lsSet('ozv.design', st);
+        moods.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b === this); }, this);
+        if (!dirty) desc.value = buildDesc();
+      } }, DESIGN_MOOD[k][1]));
+    });
+    box.appendChild(moods);
+
+    function buildDesc() {
+      return 'A ' + DESIGN_WHO[st.who][0] + ', ' + DESIGN_AGE[st.age][0] +
+        ', native German speaker with a clear standard German (Hochdeutsch) accent. ' +
+        DESIGN_MOOD[st.mood][0].charAt(0).toUpperCase() + DESIGN_MOOD[st.mood][0].slice(1) +
+        '. Natural, studio-quality recording without background noise.';
+    }
+    box.appendChild(h('h3', null, 'Описание для ElevenLabs'));
+    var desc = h('textarea', { class: 'field', style: 'min-height:96px;font:400 14px/1.45 var(--ui)', maxlength: 1000 });
+    desc.value = buildDesc();
+    desc.addEventListener('input', function () { dirty = true; });
+    box.appendChild(desc);
+    box.appendChild(h('p', { class: 'note' }, 'По-английски модель понимает описание точнее. Можно дописать своё: «slightly husky», «Bavarian accent», «speaks fast»…'));
+
+    box.appendChild(h('h3', null, 'Текст для пробы'));
+    var txt = h('textarea', { class: 'field', style: 'min-height:90px', maxlength: 1000 });
+    txt.value = DESIGN_TEXT;
+    box.appendChild(txt);
+
+    box.appendChild(h('h3', null, 'Модель'));
+    var mseg = h('div', { class: 'seg' });
+    [['eleven_multilingual_ttv_v2', 'Ровный (для v2)'], ['eleven_ttv_v3', 'Выразительный (для v3)']].forEach(function (m) {
+      mseg.appendChild(h('button', { type: 'button', class: st.model === m[0] ? 'on' : '', onclick: function () {
+        st.model = m[0]; lsSet('ozv.design', st);
+        mseg.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b === this); }, this);
+      } }, m[1]));
+    });
+    box.appendChild(mseg);
+
+    var go = h('button', { class: 'btn onair block mt', type: 'button' }, 'Создать 3 варианта');
+    box.appendChild(go);
+    var out = h('div', { class: 'list mt' });
+    box.appendChild(out);
+
+    var nameTouched = false;
+    function defaultName() { return (st.who === 'male' ? 'Jonas' : 'Lena') + ' Deutsch'; }
+    var name = h('input', { class: 'field', type: 'text', maxlength: 40, autocomplete: 'off' });
+    name.value = defaultName();
+    name.addEventListener('input', function () { nameTouched = true; });
+
+    var last = null;
+    go.onclick = function () {
+      var d = desc.value.trim(), t = txt.value.trim();
+      if (d.length < 20) { toast('Описание — минимум 20 символов', { err: true }); desc.focus(); return; }
+      if (t.length < 100) { toast('Текст для пробы — минимум 100 символов (сейчас ' + t.length + ')', { err: true }); txt.focus(); return; }
+      go.disabled = true; go.innerHTML = '<span class="spin"></span> Создаю варианты… до 30 секунд';
+      urls.forEach(function (u) { URL.revokeObjectURL(u); }); urls = [];
+      out.innerHTML = '';
+      var seed = Math.floor(Math.random() * 2147483647);
+      var keyIndex = S.quota ? S.quota.best : 0;
+      api('/api/design', { method: 'POST', body: { action: 'preview', description: d, text: t, model: st.model, keyIndex: keyIndex, seed: seed } })
+        .then(function (res) {
+          last = { res: res, description: d, text: t, model: st.model, seed: seed, keyIndex: res.keyIndex };
+          paintPreviews(res.previews || []);
+          loadQuota();
+        })
+        .catch(function (e) { out.innerHTML = ''; out.appendChild(h('p', { class: 'note', style: 'color:var(--onair)' }, esc(e.message))); })
+        .then(function () { go.disabled = false; go.textContent = 'Ещё 3 варианта'; });
+    };
+
+    function paintPreviews(list) {
+      out.innerHTML = '';
+      if (!list.length) { out.appendChild(h('p', { class: 'note' }, 'ElevenLabs не вернул вариантов — измените описание.')); return; }
+      out.appendChild(h('h3', null, 'Имя голоса'));
+      out.appendChild(name);
+      var nKeys = S.quota && S.quota.accounts ? S.quota.accounts.length : 1;
+      if (nKeys > 1) {
+        var ev = h('label', { class: 'chk' }, '<input type="checkbox" checked><span>Сохранить во все аккаунты (' + nKeys + ')' +
+          '<small>В остальных голос создаётся заново с тем же зерном — ElevenLabs обещает тот же голос. Тратит немного символов в каждом аккаунте.</small></span>');
+        out.appendChild(ev);
+        everywhere = ev.querySelector('input');
+      }
+      out.appendChild(h('h3', null, 'Послушайте и выберите'));
+      list.forEach(function (p, i) {
+        var bin = atob(p.audio || ''), u8 = new Uint8Array(bin.length);
+        for (var k = 0; k < bin.length; k++) u8[k] = bin.charCodeAt(k);
+        var url = URL.createObjectURL(new Blob([u8], { type: 'audio/mpeg' }));
+        urls.push(url);
+        var row = h('div', { class: 'voice-row' });
+        var pb = h('button', { class: 'pv', type: 'button', 'aria-label': 'Прослушать' }, ICON.play);
+        pb.onclick = function () { previewPlay(url, pb); };
+        row.appendChild(pb);
+        row.appendChild(h('div', { class: 'li-t' }, '<b>Вариант ' + (i + 1) + '</b><small>' + (p.dur ? T.fmtTime(p.dur) : '') + '</small>'));
+        var sv = h('button', { class: 'btn sm primary', type: 'button' }, 'Сохранить');
+        sv.onclick = function () { save(p, i, sv); };
+        row.appendChild(sv);
+        out.appendChild(row);
+      });
+    }
+    var everywhere = null;
+
+    function save(p, i, btn) {
+      if (!last) return;
+      var nm = name.value.trim() || defaultName();
+      out.querySelectorAll('button').forEach(function (b) { b.disabled = true; });
+      btn.innerHTML = '<span class="spin"></span>';
+      stopPreview();
+      api('/api/design', { method: 'POST', body: {
+        action: 'save', keyIndex: last.keyIndex, generatedVoiceId: p.id, index: i, name: nm,
+        description: last.description, text: last.text, model: last.model, seed: last.seed,
+        everywhere: !!(everywhere && everywhere.checked)
+      } }).then(function (res) {
+        S.voices = null;
+        var ids = res.ids || {};
+        var firstId = ids[last.keyIndex] || ids[Object.keys(ids)[0]];
+        var bad = (res.results || []).filter(function (r) { return !r.ok; });
+        if (bad.length) toast('Не сохранилось в акк. ' + bad.map(function (r) { return (r.keyIndex + 1) + ' (' + r.error + ')'; }).join('; '), { err: true });
+        else toast('Голос «' + nm + '» сохранён' + (Object.keys(ids).length > 1 ? ' в ' + Object.keys(ids).length + ' аккаунта' : ''));
+        choose({ id: firstId, name: nm, preview: '', ids: ids, labels: { language: 'de' } });
+        loadQuota();
+      }).catch(function (e) {
+        toast(e.message, { err: true });
+        out.querySelectorAll('button').forEach(function (b) { b.disabled = false; });
+        btn.textContent = 'Сохранить';
+      });
+    }
+    return box;
+  }
+
   function openVoices(role, done) {
     if (!S.token) { openLogin(function () { openVoices(role, done); }); return; }
     var box = h('div');
     var s;
     var tab = 'mine';
-    var seg = h('div', { class: 'seg' }, '<button type="button" class="on" data-t="mine">Мои голоса</button><button type="button" data-t="lib">Библиотека</button>');
+    var seg = h('div', { class: 'seg' }, '<button type="button" class="on" data-t="mine">Мои голоса</button><button type="button" data-t="lib">Библиотека</button><button type="button" data-t="make">Создать</button>');
     box.appendChild(seg);
     var filters = h('div', { class: 'row mt', hidden: true });
     filters.innerHTML =
@@ -1132,7 +1300,11 @@
 
     function choose(v) {
       role.voiceId = v.id; role.voiceName = v.name.split(' - ')[0].trim(); role.preview = v.preview || '';
-      role.voiceAccounts = v.accounts || null;
+      // id голоса по аккаунтам: у созданных голосов в каждом аккаунте свой id
+      var ids = v.ids || null;
+      if (!ids && v.accounts) { ids = {}; v.accounts.forEach(function (i) { ids[i] = v.id; }); }
+      role.voiceMap = ids;
+      role.voiceAccounts = ids ? Object.keys(ids).map(Number) : null;
       stopPreview(); s.close(); done();
     }
     function row(v, lib) {
@@ -1157,7 +1329,9 @@
           var okRes = (d.results || []).filter(function (x) { return x.ok; });
           var id = okRes.filter(function (x) { return x.id; }).map(function (x) { return x.id; })[0] || v.id;
           S.voices = null;               // список своих голосов изменился
-          choose({ id: id, name: v.name, preview: v.preview, accounts: okRes.map(function (x) { return x.keyIndex; }) });
+          var addIds = {};
+          okRes.forEach(function (x) { addIds[x.keyIndex] = x.id || id; });
+          choose({ id: id, name: v.name, preview: v.preview, ids: addIds });
           toast('Голос добавлен в аккаунт' + (d.total > 1 ? 'ы (' + d.added + ' из ' + d.total + ')' : ''));
         }).catch(function (e) { pick.disabled = false; pick.textContent = 'Добавить'; toast(e.message, { err: true }); });
       };
@@ -1211,7 +1385,10 @@
       tab = b.dataset.t;
       seg.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
       filters.hidden = tab !== 'lib';
-      if (tab === 'mine') loadMine(); else loadLib(true);
+      more.hidden = true;
+      if (tab === 'mine') loadMine();
+      else if (tab === 'make') { list.innerHTML = ''; list.appendChild(designPanel(role, choose)); }
+      else loadLib(true);
     });
     var searchSoon = debounce(function () { loadLib(true); }, 500);
     filters.addEventListener('input', function (e) { if (e.target.tagName === 'INPUT') searchSoon(); });

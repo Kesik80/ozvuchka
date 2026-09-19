@@ -1,6 +1,6 @@
 // api/voices.js — голоса ElevenLabs: список своих и поиск по общей библиотеке.
 //
-// GET  ?action=mine&keyIndex=0|all    → { voices: [{ id, name, category, labels, langs, preview, accounts }], errors }
+// GET  ?action=mine&keyIndex=0|all    → { voices: [{ id, name, category, labels, langs, preview, accounts, ids:{акк:id} }], errors }
 // GET  ?action=library&search=&gender=&language=de&page=0
 //                                     → { voices: [{ id, ownerId, name, accent, useCase, gender, language, preview, added }], hasMore }
 // POST { token, action:'add', voiceId, ownerId, name }
@@ -60,7 +60,10 @@ export default async function handler(req, res) {
         try {
           const d = await el(keys[i], '/v1/voices');
           (d.voices || []).forEach((v) => {
-            let cur = byId.get(v.voice_id);
+            // свои созданные голоса (Voice Design) в каждом аккаунте получают свой id —
+            // объединяем их по имени, чтобы в списке был один голос с картой id по аккаунтам
+            const key = v.category === 'generated' ? 'g:' + v.name : v.voice_id;
+            let cur = byId.get(key);
             if (!cur) {
               const labels = v.labels || {};
               const langs = new Set();
@@ -76,10 +79,12 @@ export default async function handler(req, res) {
                 langs: [...langs],
                 preview: v.preview_url || '',
                 accounts: [],
+                ids: {},
               };
-              byId.set(v.voice_id, cur);
+              byId.set(key, cur);
             }
             cur.accounts.push(i);
+            cur.ids[i] = v.voice_id;
           });
         } catch (e) {
           errors.push({ index: i, error: e.message });
