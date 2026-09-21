@@ -4,7 +4,7 @@
  * Сервер (/api/*) нужен только для ElevenLabs: ключи там, в браузер они не попадают.
  *
  * Проект: { id, v, title, created, updated,
- *           settings: { gap, repeat, format, hideTags, tapMode, showTr },
+ *           settings: { gap, repeat, format, hideTags, tapMode, showTr, view:'lines'|'text' },
  *           roles:  [{ id, name, color, narrator, voiceId, voiceName, preview, model,
  *                      stability, similarity, style, speed, mood }],
  *           blocks: [{ id, type:'line'|'heading', roleId, html, tr, mood,
@@ -145,7 +145,7 @@
   function newProject(title) {
     return {
       id: uid(), v: 1, title: title || 'Без названия', created: Date.now(), updated: Date.now(),
-      settings: { gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true },
+      settings: { gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true, view: 'lines' },
       roles: [newRole('Рассказчик', 6, { narrator: true })],
       blocks: []
     };
@@ -281,7 +281,7 @@
     items: function () {
       return S.proj.blocks.filter(function (b) { return isLine(b) && b.audio; }).map(function (b) {
         var r = roleById(b.roleId);
-        return { id: b.id, dur: b.audio.dur, name: r.narrator ? '' : r.name, color: r.color, text: T.plain(T.hideTags(b.html)), words: b.audio.words || null };
+        return { id: b.id, dur: b.audio.dur, name: r.narrator ? '' : r.name, color: r.color, text: T.plain(T.hideTags(b.html)), tr: b.tr || '', words: b.audio.words || null };
       });
     },
     src: function (id) { var b = blockById(id); return b && b.audio ? audioUrl(b.audio.key) : null; },
@@ -371,8 +371,11 @@
 
   function renderDoc() {
     var doc = $('doc');
+    document.body.classList.toggle('oz-kara-on', S.mode === 'read' && S.proj.settings.view === 'text');
+    var tab = S.mode === 'edit' ? 'edit' : (S.proj.settings.view === 'text' ? 'text' : 'read');
+    document.querySelectorAll('.mode button').forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.mode === tab)); });
     if (S.mode === 'read') {
-      window.OzRender.doc(doc, S.proj, function (b) { return !!b.audio; });
+      window.OzRender[S.proj.settings.view === 'text' ? 'text' : 'doc'](doc, S.proj, function (b) { return !!b.audio; });
       if (!S.proj.blocks.length) doc.querySelector('.oz-sheet').insertAdjacentHTML('beforeend', '<div class="empty"><p>Текста пока нет.</p></div>');
       return;
     }
@@ -610,6 +613,7 @@
     if (S.mode === 'read') {
       // в чтении — только строка перевода: лист не перерисовываем, плеер не сбивается
       if (busy || !b.tr) return;
+      if (el.dataset.kara) { player.refresh(); return; }   // караоке: перевод виден внизу в плеере
       var sp = el.querySelector('.oz-tr');
       if (!sp) { sp = h('span', { class: 'oz-tr' }); el.appendChild(sp); }
       sp.textContent = b.tr;
@@ -654,7 +658,7 @@
   doc.addEventListener('click', function (e) {
     var act = e.target.closest('[data-act]');
     if (S.mode === 'read') {
-      var ln = e.target.closest('.oz-line');
+      var ln = e.target.closest('.oz-line, .kr-s');
       if (ln && !ln.classList.contains('no-audio')) player.playId(ln.dataset.id, S.proj.settings.tapMode !== 'from');
       return;
     }
@@ -672,7 +676,7 @@
 
   doc.addEventListener('keydown', function (e) {
     if (S.mode === 'read') {
-      if (e.key === 'Enter' && e.target.classList.contains('oz-line')) player.playId(e.target.dataset.id, S.proj.settings.tapMode !== 'from');
+      if (e.key === 'Enter' && (e.target.classList.contains('oz-line') || e.target.classList.contains('kr-s'))) player.playId(e.target.dataset.id, S.proj.settings.tapMode !== 'from');
       return;
     }
     var ed = e.target.closest('.ed-text');
@@ -898,11 +902,17 @@
   }
 
   // ── режим ──────────────────────────────────────────────
+  // m: 'edit' | 'read' (реплики) | 'text' (сплошной текст, караоке).
+  // 'text' — то же чтение, другой вид; вид запоминается в проекте и уходит в скачанную страницу.
   function setMode(m) {
+    if (m === 'text' || m === 'read') {
+      var view = m === 'text' ? 'text' : 'lines';
+      if (S.proj.settings.view !== view) { S.proj.settings.view = view; saveSoon(); }
+      m = 'read';
+    }
     S.mode = m;
     document.body.classList.toggle('mode-edit', m === 'edit');
     document.body.classList.toggle('mode-read', m === 'read');
-    document.querySelectorAll('.mode button').forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.mode === m)); });
     renderDoc();
     player.refresh();
   }
@@ -1571,7 +1581,7 @@
     });
   }
   function migrate(p) {
-    p.settings = Object.assign({ gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true }, p.settings || {});
+    p.settings = Object.assign({ gap: 450, repeat: 0, format: 'mp3_44100_64', hideTags: true, tapMode: 'one', showTr: true, view: 'lines' }, p.settings || {});
     if (!p.roles || !p.roles.length) p.roles = [newRole('Рассказчик', 6, { narrator: true })];
     p.blocks = p.blocks || [];
   }
@@ -1804,7 +1814,7 @@
       withAudio.forEach(function (b, i) { if (res[i + 2]) audio[b.id] = { d: res[i + 2], dur: b.audio.dur, sig: b.audio.src === 'tts' ? b.audio.sig : '', w: b.audio.words || null }; });
       var data = {
         v: 1, app: 'ozvuchka', title: p.title,
-        settings: { gap: p.settings.gap, repeat: p.settings.repeat, hideTags: p.settings.hideTags, tapMode: p.settings.tapMode },
+        settings: { gap: p.settings.gap, repeat: p.settings.repeat, hideTags: p.settings.hideTags, tapMode: p.settings.tapMode, view: p.settings.view },
         roles: p.roles.map(function (r) { var c = Object.assign({}, r); return c; }),
         blocks: p.blocks.map(function (b) { return { id: b.id, type: b.type, roleId: b.roleId, html: b.html, tr: b.tr, mood: b.mood }; }),
         audio: audio
@@ -1812,14 +1822,14 @@
       var json = JSON.stringify(data).replace(/</g, '\\u003c');
       var boot = "(function(){var D=JSON.parse(document.getElementById('oz-data').textContent);" +
         "var H=document.documentElement;if(matchMedia('(prefers-color-scheme: dark)').matches)H.classList.add('dark');" +
-        "var app=document.getElementById('app');OzRender.doc(app,D,function(b){return!!D.audio[b.id]});" +
+        "var app=document.getElementById('app');var kara=D.settings.view==='text';if(kara)document.body.classList.add('oz-kara-on');OzRender[kara?'text':'doc'](app,D,function(b){return!!D.audio[b.id]});" +
         "var roles={};D.roles.forEach(function(r){roles[r.id]=r});var urls={};" +
         "function src(id){if(urls[id])return urls[id];var s=D.audio[id].d,b=atob(s.split(',')[1]),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return urls[id]=URL.createObjectURL(new Blob([u],{type:'audio/mpeg'}))}" +
-        "var items=D.blocks.filter(function(b){return b.type!=='heading'&&D.audio[b.id]}).map(function(b){var r=roles[b.roleId]||{};return{id:b.id,dur:D.audio[b.id].dur,name:r.narrator?'':r.name,color:r.color,text:OzText.plain(OzText.hideTags(b.html)),words:D.audio[b.id].w||null}});" +
+        "var items=D.blocks.filter(function(b){return b.type!=='heading'&&D.audio[b.id]}).map(function(b){var r=roles[b.roleId]||{};return{id:b.id,dur:D.audio[b.id].dur,name:r.narrator?'':r.name,color:r.color,text:OzText.plain(OzText.hideTags(b.html)),tr:b.tr||'',words:D.audio[b.id].w||null}});" +
         "var bar;var P=new OzPlayer({items:function(){return items},src:src,el:function(id){return app.querySelector('[data-id=\"'+id+'\"]')},gap:function(it){return OzGap(D.settings,it&&it.dur)},title:function(){return D.title},onChange:function(){bar&&bar.paint()},onTick:function(){bar&&bar.tick()}});" +
         "bar=OzBar(document.body,P,{translation:D.blocks.some(function(b){return b.tr})});P.refresh();" +
-        "var one=D.settings.tapMode!=='from';app.addEventListener('click',function(e){var l=e.target.closest('.oz-line');if(l&&!l.classList.contains('no-audio'))P.playId(l.dataset.id,one)});" +
-        "app.addEventListener('keydown',function(e){if(e.key==='Enter'&&e.target.classList.contains('oz-line'))P.playId(e.target.dataset.id,one)});" +
+        "var one=D.settings.tapMode!=='from';app.addEventListener('click',function(e){var l=e.target.closest('.oz-line,.kr-s');if(l&&!l.classList.contains('no-audio'))P.playId(l.dataset.id,one)});" +
+        "app.addEventListener('keydown',function(e){if(e.key==='Enter'&&(e.target.classList.contains('oz-line')||e.target.classList.contains('kr-s')))P.playId(e.target.dataset.id,one)});" +
         "document.getElementById('theme').onclick=function(){H.classList.toggle('dark')};})();";
       var html = '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n' +
         '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +

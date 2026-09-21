@@ -1,6 +1,6 @@
 /* reader.js — общий движок для приложения и для скачанной страницы.
  *   OzText   — очистка разметки, простой текст, скрытие [тегов] v3
- *   OzRender — отрисовка «листа» для чтения
+ *   OzRender — отрисовка «листа» для чтения: .doc — реплики карточками, .text — сплошной текст (караоке)
  *   OzPlayer — последовательное воспроизведение реплик, подсветка (реплика + слово), скорость, повтор
  *   OzGap    — пауза после реплики (пауза + время на повтор)
  *   OzBar    — нижний плеер
@@ -164,6 +164,68 @@
     if (!HL) return;
     root.CSS.highlights.delete('oz-said');
     root.CSS.highlights.delete('oz-now');
+  }
+
+  // ── сплошной текст (караоке) ────────────────────────────
+  // Заголовки — цветные метки разделов, реплики раздела идут одним абзацем.
+  // Звучащая реплика закрашивается маркером цвета раздела, маркер растёт вслед за голосом.
+  var SEC_COLORS = ['#c8472d', '#26357a', '#b8842a', '#1f8a64', '#8a4fc4', '#0f7fa3'];
+  function renderText(rootEl, doc, hasAudio) {
+    var roles = {};
+    (doc.roles || []).forEach(function (r) { roles[r.id] = r; });
+    var html = '<article class="oz-sheet oz-kara">', sec = -1, open = false, first = true, prevRole = null;
+    if (doc.title) html += '<h1 class="kr-title">' + esc(doc.title) + '</h1>';
+    function openSec(label, id) {
+      if (open) html += '</p></section>';
+      sec++; first = true; prevRole = null;
+      if (sec > 0 || doc.title) html += '<div class="kr-div" aria-hidden="true"><i></i></div>';
+      html += '<section class="kr-sec" style="--sc:' + SEC_COLORS[sec % SEC_COLORS.length] + '">' +
+        (label ? '<h2 class="kr-lab" data-id="' + esc(id) + '">' + esc(label) + '</h2>' : '') + '<p class="kr-p">';
+      open = true;
+    }
+    (doc.blocks || []).forEach(function (b) {
+      if (b.type === 'heading') { openSec(plain(b.html), b.id); return; }
+      var text = plain(hideTags(b.html));
+      if (!text) return;
+      if (!open) openSec('', '');
+      var r = roles[b.roleId] || {}, au = hasAudio(b);
+      // диалог: смена говорящего — с новой строки, рассказчик течёт абзацем
+      if (!r.narrator && r.name) {
+        if (!first && prevRole !== b.roleId) html += '<br>';
+        html += '<b class="kr-who" style="--c:' + esc(r.color || 'inherit') + '">' + esc(r.name) + ':</b> ';
+      } else if (!first && prevRole && !(roles[prevRole] || {}).narrator) html += '<br>';
+      prevRole = b.roleId; first = false;
+      html += '<span class="kr-s' + (au ? '' : ' no-audio') + '" data-kara="1" data-id="' + esc(b.id) + '"' +
+        (au ? ' tabindex="0" role="button"' : '') + '>' + esc(text) + '</span> ';
+    });
+    if (open) html += '</p></section>';
+    html += '</article>';
+    rootEl.innerHTML = html;
+  }
+
+  // Докуда закрасить реплику к моменту t (в символах). Внутри слова маркер
+  // растёт по буквам, после слова захватывает знаки препинания.
+  var PUNCT = /[.,!?;:\u2026"\u201c\u201d\u201e\u00bb\u00ab)\]\u2013\u2014-]/;
+  function karaOffset(K, t, dur) {
+    var str = K.str, n = str.length, off = 0;
+    if (t === Infinity) return n;
+    if (K.tm) {
+      var s = K.tm.s, e = K.tm.e, dw = K.dw, k = -1;
+      for (var i = 0; i < s.length && s[i] <= t; i++) k = i;
+      if (k < 0) return 0;
+      var w = dw[k];
+      if (t < e[k] && e[k] > s[k]) off = Math.round(w.a + (w.b - w.a) * (t - s[k]) / (e[k] - s[k]));
+      else {
+        off = w.b;
+        while (off < n && (PUNCT.test(str[off]) || (str[off] === ' ' && off + 1 < n && PUNCT.test(str[off + 1])))) off++;
+        // после последнего слова — до конца (эмодзи и т.п.)
+        if (k === s.length - 1 && t > e[k] + 0.15) off = n;
+      }
+    } else if (dur) off = Math.round(n * Math.min(1, t / dur));
+    // не разрезать эмодзи (суррогатную пару) пополам
+    var c = str.charCodeAt(off);
+    if (off > 0 && off < n && c >= 0xDC00 && c <= 0xDFFF) off++;
+    return Math.max(0, Math.min(n, off));
   }
 
   // ── плеер ───────────────────────────────────────────────
@@ -339,7 +401,7 @@
       var self = this;
       this._stopRaf();
       this._paint(1);
-      this._hl(Infinity);
+      if (!this._kara(Infinity)) this._hl(Infinity);
       if (this.loop) { this.a.currentTime = 0; this.a.play(); return; }
       if (this.one || this.idx >= this.list.length - 1) {
         this.playing = false;
@@ -356,8 +418,13 @@
       var it = this.list[this.idx];
       var el = it && this.o.el(it.id);
       this._w = null;
+      this._k = null;
       clearHL();
       if (!el) return;
+      if (el.dataset.kara) {                       // караоке: убрать маркер
+        if (el._kt == null) el._kt = el.textContent;
+        else el.textContent = el._kt;
+      }
       el.classList.toggle('is-playing', on);
       el.style.setProperty('--p', '0');
       if (on && root.OzPlayerAutoScroll !== false) {
@@ -380,12 +447,32 @@
       (function loop() {
         var d = self.a.duration;
         if (d && isFinite(d)) self._paint(self.a.currentTime / d);
-        self._hl(self.a.currentTime);
+        if (!self._kara(self.a.currentTime)) self._hl(self.a.currentTime);
         if (self.o.onTick) self.o.onTick();
         self._raf = requestAnimationFrame(loop);
       })();
     },
     _stopRaf: function () { cancelAnimationFrame(this._raf); this._raf = 0; },
+
+    // Караоке: маркер от начала реплики до текущего места. false — это не караоке-вид.
+    _kara: function (t) {
+      var it = this.list[this.idx];
+      var el = it && this.o.el(it.id);
+      if (!el || !el.dataset.kara) return false;
+      var K = this._k, d = this.a.duration;
+      d = isFinite(d) && d > 0 ? d : it.dur;
+      if (!K || K.id !== it.id || K.el !== el) {
+        if (el._kt == null) el._kt = el.textContent;
+        var dw = wordsIn(el._kt);
+        K = this._k = { id: it.id, el: el, str: el._kt, dw: dw, tm: null, off: -1 };
+      }
+      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d);
+      var off = karaOffset(K, t, d);
+      if (off === K.off) return true;
+      K.off = off;
+      el.innerHTML = off > 0 ? '<span class="kr-mk">' + esc(K.str.slice(0, off)) + '</span>' + esc(K.str.slice(off)) : esc(K.str);
+      return true;
+    },
 
     // Разметить слова текущей реплики: диапазоны в тексте + время каждого слова
     _wPrep: function () {
@@ -509,6 +596,7 @@
       trb.classList.toggle('on', !hidden);
       trb.setAttribute('aria-pressed', String(!hidden));
       if (opts.onTr) opts.onTr(!hidden);
+      paint();
     };
 
     function seekAt(x) {
@@ -553,7 +641,10 @@
       var it = player.current();
       if (it) {
         el.style.setProperty('--nowc', it.color || 'inherit');
-        now.innerHTML = '<b>' + esc(it.name || '') + '</b>' + (it.name ? ' · ' : '') + esc((it.text || '').slice(0, 120));
+        // в караоке текст и так на виду — внизу показываем перевод звучащей реплики
+        var cls = document.body.classList;
+        var line = cls.contains('oz-kara-on') && !cls.contains('oz-hide-tr') && it.tr ? it.tr : it.text;
+        now.innerHTML = '<b>' + esc(it.name || '') + '</b>' + (it.name ? ' · ' : '') + esc((line || '').slice(0, 160));
       } else {
         now.textContent = player.list.length ? (opts.idle || 'Нажмите на реплику или ▶') : (opts.empty || 'Озвученных реплик пока нет');
       }
@@ -571,7 +662,7 @@
   }
 
   root.OzText = { esc: esc, sanitize: sanitize, plain: plain, hideTags: hideTags, fmtTime: fmtTime };
-  root.OzRender = { doc: render };
+  root.OzRender = { doc: render, text: renderText };
   root.OzPlayer = Player;
   root.OzGap = gapMs;
   root.OzWords = { supported: HL, wordsIn: wordsIn };
