@@ -290,12 +290,13 @@ body.oz-export {
   .oz-line::after { transition: none; }
 }
 
-/* ── пословная подсветка (CSS Custom Highlight API) ─────────
-   Сказанные слова — маркер, звучащее сейчас — ярче. Разметку текста не меняет. */
-::highlight(oz-said) { background-color: rgba(255, 213, 79, .38); }
-::highlight(oz-now)  { background-color: rgba(255, 190, 20, .9); color: #1b1e2e; }
-html.dark ::highlight(oz-said) { background-color: rgba(240, 180, 41, .26); }
-html.dark ::highlight(oz-now)  { background-color: rgba(240, 180, 41, .85); color: #11131b; }
+/* ── маркер в режиме реплик ─────────────────────────────────
+   Один сплошной маркер под текстом, растёт вслед за голосом. Общая заливка реплики
+   при этом выключается — остаётся только маркер. */
+.oz-mkl { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+.oz-mkl i { position: absolute; border-radius: 7px; background: rgba(255, 200, 60, .5); }
+html.dark .oz-mkl i { background: rgba(240, 180, 41, .34); }
+.oz-line.oz-mk-on.is-playing::after { opacity: 0 !important; }
 
 /* ── сплошной текст (караоке) ───────────────────────────────
    Как в учебных роликах: метки разделов, абзацы, маркер растёт за голосом. */
@@ -341,9 +342,9 @@ html.dark .kr-lab { background: color-mix(in srgb, var(--sc) 80%, #ffffff); colo
 .kr-s:focus-visible { box-shadow: 0 0 0 2px var(--accent); }
 .kr-mk {
   background: var(--mk);
-  border-radius: .4em;
-  padding: .06em .16em;
-  margin: 0 -.16em;
+  border-radius: .45em;
+  padding: .06em .18em;
+  margin: 0 -.18em;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
   transition: background-color .2s;

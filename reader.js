@@ -103,10 +103,7 @@
     return Math.max(0, +settings.gap || 0) + Math.max(0, +settings.repeat || 0) * Math.max(0, +dur || 0) * 1000;
   }
 
-  // ── пословная подсветка ─────────────────────────────────
-  // CSS Custom Highlight API: подсвечиваем слова, не трогая разметку —
-  // поэтому работает и в редакторе (contenteditable), и в скачанной странице.
-  var HL = !!(root.CSS && root.CSS.highlights && root.Highlight);
+  // ── пословная подсветка: слова и их время ───────────────
   var WORD_RE;
   try { WORD_RE = new RegExp("[\\p{L}\\p{N}]+(?:['\u2019\\-][\\p{L}\\p{N}]+)*", 'gu'); }
   catch (e) { WORD_RE = /[A-Za-z\u00c0-\u024f\u0400-\u04ff0-9]+/g; }
@@ -158,12 +155,6 @@
       e[i] = lead + span * acc / wt;
     }
     return { s: s, e: e, est: true };
-  }
-
-  function clearHL() {
-    if (!HL) return;
-    root.CSS.highlights.delete('oz-said');
-    root.CSS.highlights.delete('oz-now');
   }
 
   // ── сплошной текст (караоке) ────────────────────────────
@@ -271,6 +262,9 @@
       self.playing = false; self._stopRaf(); self._emit();
       if (o.onError) o.onError(self.list[self.idx]);
     });
+
+    // поворот экрана / другой шрифт — строки перенеслись, маркер перерисовать
+    addEventListener('resize', function () { if (self._w && self._w.off > 0 && self._w.el.isConnected) self._mkDraw(self._w); });
 
     if ('mediaSession' in navigator) {
       var ms = navigator.mediaSession;
@@ -401,7 +395,7 @@
       var self = this;
       this._stopRaf();
       this._paint(1);
-      if (!this._kara(Infinity)) this._hl(Infinity);
+      if (!this._kara(Infinity)) this._mk(Infinity);
       if (this.loop) { this.a.currentTime = 0; this.a.play(); return; }
       if (this.one || this.idx >= this.list.length - 1) {
         this.playing = false;
@@ -419,8 +413,8 @@
       var el = it && this.o.el(it.id);
       this._w = null;
       this._k = null;
-      clearHL();
       if (!el) return;
+      this._mkClear(el);
       if (el.dataset.kara) {                       // караоке: убрать маркер
         if (el._kt == null) el._kt = el.textContent;
         else el.textContent = el._kt;
@@ -447,7 +441,7 @@
       (function loop() {
         var d = self.a.duration;
         if (d && isFinite(d)) self._paint(self.a.currentTime / d);
-        if (!self._kara(self.a.currentTime)) self._hl(self.a.currentTime);
+        if (!self._kara(self.a.currentTime)) self._mk(self.a.currentTime);
         if (self.o.onTick) self.o.onTick();
         self._raf = requestAnimationFrame(loop);
       })();
@@ -474,58 +468,73 @@
       return true;
     },
 
-    // Разметить слова текущей реплики: диапазоны в тексте + время каждого слова
-    _wPrep: function () {
-      var it = this.list[this.idx];
-      var el = it && this.o.el(it.id);
-      var box = el && (el.querySelector('.oz-text') || el);
-      if (!box) return null;
+    // Маркер в режиме реплик: один сплошной маркер от начала реплики до текущего места
+    // (вместе с пробелами, со скруглёнными углами). Рисуется отдельным слоем под текстом —
+    // сам текст не трогаем, поэтому работает и в редакторе (contenteditable).
+    _mkPrep: function (el, it) {
+      var box = el.querySelector('.oz-text') || el;
       var tw = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), nodes = [], str = '', n;
       while ((n = tw.nextNode())) { nodes.push({ n: n, o: str.length }); str += n.nodeValue; }
-      var dw = wordsIn(str);
-      if (!dw.length) return null;
-      var d = this.a.duration;
-      var tm = timesFor(dw, it.words, isFinite(d) ? d : it.dur);
-      if (!tm) return null;
-      function pos(off, end) {
-        for (var i = nodes.length - 1; i >= 0; i--) {
-          if (off > nodes[i].o || (!end && off === nodes[i].o)) return [nodes[i].n, off - nodes[i].o];
-        }
-        return [nodes[0].n, 0];
-      }
-      var ranges = dw.map(function (w) {
-        var r = document.createRange(), a = pos(w.a, false), b = pos(w.b, true);
-        try { r.setStart(a[0], a[1]); r.setEnd(b[0], b[1]); } catch (e) {}
-        return r;
-      });
-      return { id: it.id, box: box, r: ranges, s: tm.s, e: tm.e, k: -2 };
+      return { id: it.id, el: el, box: box, nodes: nodes, str: str, dw: wordsIn(str), tm: null, off: -1 };
     },
-    // Подсветить слова до момента t: сказанные — маркером, звучащее — ярче
-    _hl: function (t) {
-      if (!HL || root.OzWordHL === false) return;
+    _mk: function (t) {
+      if (root.OzWordHL === false) return;
       var it = this.list[this.idx];
-      if (!it) return;
-      var w = this._w;
-      if (!w || w.id !== it.id || !w.box.isConnected) w = this._w = this._wPrep();
-      if (!w) return;
-      var k = -1, n = w.s.length;
-      if (t === Infinity) k = n;
-      else {
-        var i = w.k >= 0 && w.k < n && w.s[w.k] <= t + 0.04 ? w.k : 0;
-        for (; i < n && w.s[i] <= t + 0.04; i++) k = i;
+      var el = it && this.o.el(it.id);
+      if (!el) return;
+      var K = this._w, d = this.a.duration;
+      d = isFinite(d) && d > 0 ? d : it.dur;
+      if (!K || K.id !== it.id || K.el !== el || !K.box.isConnected) K = this._w = this._mkPrep(el, it);
+      if (!K.nodes.length) return;
+      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d);
+      var off = karaOffset(K, t, d);
+      if (off === K.off) return;
+      K.off = off;
+      el.classList.add('oz-mk-on');
+      this._mkDraw(K);
+    },
+    _mkDraw: function (K) {
+      var el = K.el, layer = null;
+      for (var c = el.firstChild; c; c = c.nextSibling) if (c.nodeType === 1 && c.classList.contains('oz-mkl')) layer = c;
+      if (!layer) {
+        layer = document.createElement('span');
+        layer.className = 'oz-mkl';
+        layer.setAttribute('aria-hidden', 'true');
+        el.appendChild(layer);
       }
-      if (k === w.k) return;
-      w.k = k;
-      var said = w.r.slice(0, Math.max(0, Math.min(k, n)));
-      var now = k >= 0 && k < n && t <= w.e[k] + 0.25 ? [w.r[k]] : [];
-      if (k >= 0 && k < n && !now.length) said = w.r.slice(0, k + 1);
+      if (K.off <= 0) { layer.innerHTML = ''; return; }
+      // позиция в тексте → узел + смещение
+      var end = K.nodes[K.nodes.length - 1], off = K.off;
+      for (var i = 0; i < K.nodes.length; i++) {
+        var nd = K.nodes[i];
+        if (off <= nd.o + nd.n.nodeValue.length) { end = nd; break; }
+      }
+      var r = document.createRange();
       try {
-        var hs = new root.Highlight(), hn = new root.Highlight();
-        said.forEach(function (r) { hs.add(r); });
-        now.forEach(function (r) { hn.add(r); });
-        root.CSS.highlights.set('oz-said', hs);
-        root.CSS.highlights.set('oz-now', hn);
-      } catch (e) {}
+        r.setStart(K.nodes[0].n, 0);
+        r.setEnd(end.n, Math.min(end.n.nodeValue.length, Math.max(0, off - end.o)));
+      } catch (e) { return; }
+      // прямоугольники по строкам: куски одной строки склеиваем, чтобы пробелы тоже были закрашены
+      var base = el.getBoundingClientRect(), rows = [], list = r.getClientRects();
+      for (var j = 0; j < list.length; j++) {
+        var q = list[j];
+        if (q.width < 1 || q.height < 1) continue;
+        var row = null;
+        for (var k = 0; k < rows.length; k++) if (Math.abs(rows[k].cy - (q.top + q.bottom) / 2) < q.height / 2) row = rows[k];
+        if (!row) rows.push({ l: q.left, r: q.right, t: q.top, b: q.bottom, cy: (q.top + q.bottom) / 2 });
+        else { row.l = Math.min(row.l, q.left); row.r = Math.max(row.r, q.right); row.t = Math.min(row.t, q.top); row.b = Math.max(row.b, q.bottom); }
+      }
+      var h = '';
+      rows.forEach(function (w) {
+        h += '<i style="left:' + (w.l - base.left - 3).toFixed(1) + 'px;top:' + (w.t - base.top - 1).toFixed(1) +
+          'px;width:' + (w.r - w.l + 6).toFixed(1) + 'px;height:' + (w.b - w.t + 2).toFixed(1) + 'px"></i>';
+      });
+      layer.innerHTML = h;
+    },
+    _mkClear: function (el) {
+      if (!el) return;
+      el.classList.remove('oz-mk-on');
+      for (var c = el.firstChild; c; c = c.nextSibling) if (c.nodeType === 1 && c.classList.contains('oz-mkl')) { el.removeChild(c); break; }
     },
     _meta: function (it) {
       if (!('mediaSession' in navigator) || !root.MediaMetadata) return;
@@ -665,6 +674,6 @@
   root.OzRender = { doc: render, text: renderText };
   root.OzPlayer = Player;
   root.OzGap = gapMs;
-  root.OzWords = { supported: HL, wordsIn: wordsIn };
+  root.OzWords = { wordsIn: wordsIn };
   root.OzBar = Bar;
 })(window);

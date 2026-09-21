@@ -2166,9 +2166,9 @@
     at.querySelector('input').onchange = function () { prefs.autoTr = this.checked; savePrefs(); };
     box.appendChild(at);
 
-    var wh = h('label', { class: 'chk' }, '<input type="checkbox"' + (prefs.words ? ' checked' : '') + '><span>Подсвечивать слова во время звучания' +
-      (window.OzWords && window.OzWords.supported ? '<small>Точно — у реплик, озвученных после обновления; у старых и своих файлов — примерно</small>' : '<small>Этот браузер подсветку слов не умеет — работает в Chrome</small>') + '</span>');
-    wh.querySelector('input').onchange = function () { prefs.words = this.checked; window.OzWordHL = this.checked; savePrefs(); if (!this.checked && window.CSS && CSS.highlights) CSS.highlights.clear(); };
+    var wh = h('label', { class: 'chk' }, '<input type="checkbox"' + (prefs.words ? ' checked' : '') + '><span>Маркер по словам во время звучания' +
+      '<small>Маркер растёт за голосом. Точно — у реплик, озвученных после обновления; у старых и своих файлов — примерно. Выключено — заливается вся реплика</small></span>');
+    wh.querySelector('input').onchange = function () { prefs.words = this.checked; window.OzWordHL = this.checked; savePrefs(); };
     box.appendChild(wh);
 
     var accH = h('h3', null, 'ElevenLabs');
