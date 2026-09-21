@@ -8,7 +8,9 @@
  *           roles:  [{ id, name, color, narrator, voiceId, voiceName, preview, model,
  *                      stability, similarity, style, speed, mood }],
  *           blocks: [{ id, type:'line'|'heading', roleId, html, tr, mood,
- *                      audio: { key, sig, dur, src:'tts'|'file' } }] }
+ *                      audio: { key, sig, dur, src:'tts'|'file', words:[[слово, начало, конец]] } }] }
+ *
+ * Перевод реплик — /api/translate (Gemini). Пословная подсветка — reader.js (OzPlayer).
  */
 (function () {
   'use strict';
@@ -66,6 +68,10 @@
   };
 
   var prefs = lsGet('ozv.prefs', { theme: 'auto', lastId: '', tr: true });
+  if (!prefs.trTo) prefs.trTo = 'ru';                 // язык перевода: ru | uk
+  if (prefs.autoTr == null) prefs.autoTr = true;     // переводить вместе с озвучкой
+  if (prefs.words == null) prefs.words = true;       // пословная подсветка
+  window.OzWordHL = prefs.words;
   function savePrefs() { lsSet('ozv.prefs', prefs); }
 
   function lsGet(k, d) { try { var v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? d : v; } catch (e) { return d; } }
@@ -259,11 +265,12 @@
       a.src = u;
     });
   }
-  function setAudio(b, blob, src, signature) {
+  function setAudio(b, blob, src, signature, words) {
     var old = b.audio && b.audio.key;
     var key = b.id + ':' + uid();
     return idb.put('audio', blob, key).then(function () { return blobDuration(blob); }).then(function (dur) {
       b.audio = { key: key, sig: signature, dur: dur, src: src };
+      if (words && words.length) b.audio.words = words;
       if (old) dropAudio(old);
       saveSoon();
     });
@@ -274,7 +281,7 @@
     items: function () {
       return S.proj.blocks.filter(function (b) { return isLine(b) && b.audio; }).map(function (b) {
         var r = roleById(b.roleId);
-        return { id: b.id, dur: b.audio.dur, name: r.narrator ? '' : r.name, color: r.color, text: T.plain(T.hideTags(b.html)) };
+        return { id: b.id, dur: b.audio.dur, name: r.narrator ? '' : r.name, color: r.color, text: T.plain(T.hideTags(b.html)), words: b.audio.words || null };
       });
     },
     src: function (id) { var b = blockById(id); return b && b.audio ? audioUrl(b.audio.key) : null; },
@@ -466,6 +473,7 @@
     if (!S.token) { openLogin(function () { generate(ids); }); return; }
     if (S.gen.running) return;
     var queue = ids.slice();
+    if (prefs.autoTr) translate(ids, { quiet: true });   // перевод параллельно с озвучкой — пустые строки перевода
     S.gen = { running: true, stop: false, done: 0, total: ids.length };
     paintGen();
     var fails = 0, authLost = false;
@@ -520,7 +528,8 @@
         voiceSettings: { stability: r.stability, similarity_boost: r.similarity, style: r.style, speed: r.speed, use_speaker_boost: true },
         previousText: nb.prev, nextText: nb.next,
         keyIndex: keyFor(r),
-        format: S.proj.settings.format
+        format: S.proj.settings.format,
+        timestamps: true
       })
     }).then(function (res) {
       if (!res.ok) {
@@ -528,6 +537,14 @@
           var e = new Error(d.error || ('Ошибка ' + res.status));
           e.code = d.code || (res.status === 401 ? 'auth' : '');
           throw e;
+        });
+      }
+      // с временем слов сервер отвечает JSON { audio: base64, words }, без — голым MP3
+      if (/json/.test(res.headers.get('Content-Type') || '')) {
+        return res.json().then(function (d) {
+          return fetch('data:audio/mpeg;base64,' + d.audio).then(function (x) { return x.blob(); }).then(function (blob) {
+            return setAudio(b, new Blob([blob], { type: 'audio/mpeg' }), 'tts', signature, d.words);
+          });
         });
       }
       return res.blob().then(function (blob) { return setAudio(b, blob, 'tts', signature); });
@@ -540,6 +557,68 @@
       repaintHead(b);
       throw e;
     });
+  }
+
+  // ── перевод ────────────────────────────────────────────
+  // ids — какие реплики; force — переводить и уже переведённые; quiet — без тоста «готово»
+  var TR_NAME = { ru: 'русский', uk: 'украинский' };
+  function lineText(b) { return T.plain(T.hideTags(b.html)); }
+  function translate(ids, o) {
+    o = o || {};
+    if (!S.token) { openLogin(function () { translate(ids, o); }); return Promise.resolve(); }
+    var list = ids.map(blockById).filter(function (b) { return b && isLine(b) && lineText(b) && (o.force || !b.tr); });
+    if (!list.length) { if (!o.quiet) toast('Все реплики уже переведены'); return Promise.resolve(); }
+    if (S.trBusy) return Promise.resolve();
+    S.trBusy = true;
+    list.forEach(function (b) { markTr(b, true); });
+    // пачки по 40 реплик / 6000 символов — лимит запроса
+    var packs = [], cur = [], chars = 0;
+    list.forEach(function (b) {
+      var n = lineText(b).length;
+      if (cur.length && (cur.length >= 40 || chars + n > 6000)) { packs.push(cur); cur = []; chars = 0; }
+      cur.push(b); chars += n;
+    });
+    if (cur.length) packs.push(cur);
+    var done = 0, err = null;
+    var chain = packs.reduce(function (p, pack) {
+      return p.then(function () {
+        if (err) return;
+        return api('/api/translate', { method: 'POST', body: { lines: pack.map(lineText), from: 'auto', to: prefs.trTo, title: S.proj.title } })
+          .then(function (d) {
+            pack.forEach(function (b, i) {
+              var t = (d.tr && d.tr[i]) || '';
+              if (t && blockById(b.id)) { b.tr = t; done++; }
+              markTr(b, false);
+            });
+            saveSoon();
+          }, function (e) { err = e; pack.forEach(function (b) { markTr(b, false); }); });
+      });
+    }, Promise.resolve());
+    return chain.then(function () {
+      S.trBusy = false;
+      list.forEach(function (b) { markTr(b, false); });
+      if (err) {
+        if (err.code === 'auth') openLogin(function () { translate(ids, o); });
+        else toast('Перевод не удался: ' + err.message, { err: true });
+      } else if (!o.quiet) toast('Переведено: ' + done + ' ' + plural(done, 'реплика', 'реплики', 'реплик') + ' → ' + TR_NAME[prefs.trTo]);
+    });
+  }
+  // показать перевод в строке реплики, не сбивая курсор, если человек там печатает
+  function markTr(b, busy) {
+    var el = document.querySelector('#doc [data-id="' + b.id + '"]');
+    if (!el) return;
+    if (S.mode === 'read') {
+      // в чтении — только строка перевода: лист не перерисовываем, плеер не сбивается
+      if (busy || !b.tr) return;
+      var sp = el.querySelector('.oz-tr');
+      if (!sp) { sp = h('span', { class: 'oz-tr' }); el.appendChild(sp); }
+      sp.textContent = b.tr;
+      return;
+    }
+    var tr = el.querySelector('.ed-tr');
+    if (!tr) return;
+    tr.classList.toggle('busy', !!busy);
+    if (!busy && document.activeElement !== tr && tr.textContent !== (b.tr || '')) tr.textContent = b.tr || '';
   }
 
   // ── редактор: ввод ─────────────────────────────────────
@@ -787,6 +866,15 @@
   function fmt(cmd) {
     if (cmd === 'line' || cmd === 'heading') { addBlock(cmd); return; }
     if (cmd === 'import') { openImport(); return; }
+    if (cmd === 'translate') {
+      // сначала — все реплики без перевода; если таких нет, а курсор в реплике — её заново
+      var missing = S.proj.blocks.some(function (b) { return isLine(b) && !b.tr && lineText(b); });
+      var cur = activeEditor(), wrap = cur && cur.closest('.oz-line[data-id]');
+      if (missing) translate(S.proj.blocks.map(function (b) { return b.id; }));
+      else if (wrap) translate([wrap.dataset.id], { force: true });
+      else toast('Все реплики уже переведены. Заново — в меню реплики «…»');
+      return;
+    }
     var ed = activeEditor();
     if (!ed) { toast('Сначала выделите текст в реплике'); return; }
     if (ed.closest('.ed-h')) return;          // заголовок без оформления
@@ -913,6 +1001,7 @@
     box.appendChild(h('h3', null, 'Реплика'));
     var list = h('div', { class: 'list' });
     function item(label, fn) { list.appendChild(h('button', { class: 'li', type: 'button', onclick: function () { s.close(); fn(); } }, '<span class="li-t"><b>' + label + '</b></span>')); }
+    if (isL && lineText(b)) item(b.tr ? 'Перевести заново' : 'Перевести', function () { translate([b.id], { force: true }); });
     item('Вставить реплику ниже', function () { addBlock('line', b.id); });
     item(isL ? 'Сделать заголовком' : 'Сделать репликой', function () {
       if (isL) { b.type = 'heading'; b.html = esc(T.plain(b.html)); }
@@ -1680,6 +1769,7 @@
       return fetch(a.d).then(function (r) { return r.blob(); }).then(function (blob) {
         var key = b.id + ':' + uid();
         b.audio = { key: key, sig: a.sig || 'file', dur: a.dur || 0, src: a.sig ? 'tts' : 'file' };
+        if (Array.isArray(a.w) && a.w.length) b.audio.words = a.w;
         return idb.put('audio', blob, key);
       });
     }).filter(Boolean);
@@ -1711,7 +1801,7 @@
       return idb.get('audio', b.audio.key).then(function (blob) { return blob ? blobToDataUrl(blob) : null; });
     }))).then(function (res) {
       var css = res[0], js = res[1], audio = {};
-      withAudio.forEach(function (b, i) { if (res[i + 2]) audio[b.id] = { d: res[i + 2], dur: b.audio.dur, sig: b.audio.src === 'tts' ? b.audio.sig : '' }; });
+      withAudio.forEach(function (b, i) { if (res[i + 2]) audio[b.id] = { d: res[i + 2], dur: b.audio.dur, sig: b.audio.src === 'tts' ? b.audio.sig : '', w: b.audio.words || null }; });
       var data = {
         v: 1, app: 'ozvuchka', title: p.title,
         settings: { gap: p.settings.gap, repeat: p.settings.repeat, hideTags: p.settings.hideTags, tapMode: p.settings.tapMode },
@@ -1725,7 +1815,7 @@
         "var app=document.getElementById('app');OzRender.doc(app,D,function(b){return!!D.audio[b.id]});" +
         "var roles={};D.roles.forEach(function(r){roles[r.id]=r});var urls={};" +
         "function src(id){if(urls[id])return urls[id];var s=D.audio[id].d,b=atob(s.split(',')[1]),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return urls[id]=URL.createObjectURL(new Blob([u],{type:'audio/mpeg'}))}" +
-        "var items=D.blocks.filter(function(b){return b.type!=='heading'&&D.audio[b.id]}).map(function(b){var r=roles[b.roleId]||{};return{id:b.id,dur:D.audio[b.id].dur,name:r.narrator?'':r.name,color:r.color,text:OzText.plain(OzText.hideTags(b.html))}});" +
+        "var items=D.blocks.filter(function(b){return b.type!=='heading'&&D.audio[b.id]}).map(function(b){var r=roles[b.roleId]||{};return{id:b.id,dur:D.audio[b.id].dur,name:r.narrator?'':r.name,color:r.color,text:OzText.plain(OzText.hideTags(b.html)),words:D.audio[b.id].w||null}});" +
         "var bar;var P=new OzPlayer({items:function(){return items},src:src,el:function(id){return app.querySelector('[data-id=\"'+id+'\"]')},gap:function(it){return OzGap(D.settings,it&&it.dur)},title:function(){return D.title},onChange:function(){bar&&bar.paint()},onTick:function(){bar&&bar.tick()}});" +
         "bar=OzBar(document.body,P,{translation:D.blocks.some(function(b){return b.tr})});P.refresh();" +
         "var one=D.settings.tapMode!=='from';app.addEventListener('click',function(e){var l=e.target.closest('.oz-line');if(l&&!l.classList.contains('no-audio'))P.playId(l.dataset.id,one)});" +
@@ -2059,6 +2149,17 @@
     var tr = h('label', { class: 'chk' }, '<input type="checkbox"' + (st.showTr ? ' checked' : '') + '><span>Строка перевода под каждой репликой<small>Если выключено — видна только у заполненных</small></span>');
     tr.querySelector('input').onchange = function () { st.showTr = this.checked; document.body.classList.toggle('no-tr-field', !st.showTr); touch(); };
     box.appendChild(tr);
+
+    box.appendChild(h('h3', null, 'Перевод реплик'));
+    box.appendChild(segOf([['ru', 'На русский'], ['uk', 'На украинский']], prefs.trTo, function (v) { prefs.trTo = v; savePrefs(); }));
+    var at = h('label', { class: 'chk' }, '<input type="checkbox"' + (prefs.autoTr ? ' checked' : '') + '><span>Переводить вместе с озвучкой<small>Реплики без перевода получат его сами. Уже написанный перевод не трогается</small></span>');
+    at.querySelector('input').onchange = function () { prefs.autoTr = this.checked; savePrefs(); };
+    box.appendChild(at);
+
+    var wh = h('label', { class: 'chk' }, '<input type="checkbox"' + (prefs.words ? ' checked' : '') + '><span>Подсвечивать слова во время звучания' +
+      (window.OzWords && window.OzWords.supported ? '<small>Точно — у реплик, озвученных после обновления; у старых и своих файлов — примерно</small>' : '<small>Этот браузер подсветку слов не умеет — работает в Chrome</small>') + '</span>');
+    wh.querySelector('input').onchange = function () { prefs.words = this.checked; window.OzWordHL = this.checked; savePrefs(); if (!this.checked && window.CSS && CSS.highlights) CSS.highlights.clear(); };
+    box.appendChild(wh);
 
     var accH = h('h3', null, 'ElevenLabs');
     box.appendChild(accH);

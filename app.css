@@ -228,6 +228,12 @@ body.mode-read .fmt { display: none; }
 .ed-tr:empty::before { content: attr(data-ph); opacity: .45; pointer-events: none; }
 body.no-tr-field .ed-tr:empty:not(:focus) { display: none; }
 .oz-hide-tr .ed-tr { display: none; }
+/* перевод ещё идёт */
+.ed-tr.busy { animation: trPulse 1s ease-in-out infinite; pointer-events: none; }
+.ed-tr.busy:empty::before { content: 'перевожу…'; opacity: .6; }
+body.no-tr-field .ed-tr.busy:empty { display: block; }
+@keyframes trPulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .ed-tr.busy { animation: none; opacity: .6; } }
 
 .ed-h { display: flex; align-items: flex-start; gap: 6px; margin: 1.4em 0 .5em; }
 .ed-h .oz-h { flex: 1; margin: 0; outline: none; min-height: 1.3em; cursor: text; }

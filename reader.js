@@ -1,7 +1,8 @@
 /* reader.js — общий движок для приложения и для скачанной страницы.
  *   OzText   — очистка разметки, простой текст, скрытие [тегов] v3
  *   OzRender — отрисовка «листа» для чтения
- *   OzPlayer — последовательное воспроизведение реплик, подсветка, скорость, повтор
+ *   OzPlayer — последовательное воспроизведение реплик, подсветка (реплика + слово), скорость, повтор
+ *   OzGap    — пауза после реплики (пауза + время на повтор)
  *   OzBar    — нижний плеер
  * Без зависимостей. Встраивается в экспорт как есть.
  */
@@ -96,9 +97,79 @@
     rootEl.innerHTML = html;
   }
 
+  // Пауза после реплики: общая пауза + «время на повтор» (доля длины реплики)
+  function gapMs(settings, dur) {
+    settings = settings || {};
+    return Math.max(0, +settings.gap || 0) + Math.max(0, +settings.repeat || 0) * Math.max(0, +dur || 0) * 1000;
+  }
+
+  // ── пословная подсветка ─────────────────────────────────
+  // CSS Custom Highlight API: подсвечиваем слова, не трогая разметку —
+  // поэтому работает и в редакторе (contenteditable), и в скачанной странице.
+  var HL = !!(root.CSS && root.CSS.highlights && root.Highlight);
+  var WORD_RE;
+  try { WORD_RE = new RegExp("[\\p{L}\\p{N}]+(?:['\u2019\\-][\\p{L}\\p{N}]+)*", 'gu'); }
+  catch (e) { WORD_RE = /[A-Za-z\u00c0-\u024f\u0400-\u04ff0-9]+/g; }
+  var TAG_ONE = /\[[a-zA-Z][a-zA-Z \-']{0,30}\]/g;
+
+  function wordsIn(str) {
+    var skip = [], out = [], m;
+    TAG_ONE.lastIndex = 0;
+    while ((m = TAG_ONE.exec(str))) skip.push([m.index, m.index + m[0].length]);
+    WORD_RE.lastIndex = 0;
+    while ((m = WORD_RE.exec(str))) {
+      var a = m.index, tag = false;
+      for (var i = 0; i < skip.length; i++) if (a >= skip[i][0] && a < skip[i][1]) tag = true;
+      if (!tag) out.push({ w: m[0].toLowerCase().replace(/\u2019/g, "'"), a: a, b: a + m[0].length });
+    }
+    return out;
+  }
+
+  // Время каждого слова на экране. tw — [[слово, начало, конец]] от ElevenLabs.
+  // Слова сопоставляются по порядку с небольшим окном: если текст чуть поправили
+  // после озвучки, подсветка не съезжает до конца реплики.
+  // Нет разметки (свой файл, старая озвучка) — оценка по длине слов.
+  function timesFor(dw, tw, dur) {
+    var n = dw.length, s = new Array(n), e = new Array(n), i, j = 0, k;
+    if (tw && tw.length) {
+      for (i = 0; i < n; i++) {
+        for (k = j; k < Math.min(tw.length, j + 5); k++) {
+          if (tw[k][0] === dw[i].w) { s[i] = tw[k][1]; e[i] = tw[k][2]; j = k + 1; break; }
+        }
+      }
+      // пробелы в сопоставлении — делим промежуток поровну
+      for (i = 0; i < n; i++) {
+        if (s[i] != null) continue;
+        var from = i, to = i;
+        while (to < n && s[to] == null) to++;
+        var t0 = from > 0 ? e[from - 1] : 0, t1 = to < n ? s[to] : (dur || t0 + 0.4 * (to - from));
+        var step = Math.max(0, t1 - t0) / (to - from);
+        for (k = from; k < to; k++) { s[k] = t0 + step * (k - from); e[k] = s[k] + step; }
+        i = to - 1;
+      }
+      return { s: s, e: e, est: false };
+    }
+    if (!dur) return null;
+    var wt = 0, acc = 0, lead = Math.min(0.15, dur * 0.04), span = Math.max(0.1, dur - lead - Math.min(0.3, dur * 0.06));
+    for (i = 0; i < n; i++) wt += dw[i].w.length + 2;
+    for (i = 0; i < n; i++) {
+      s[i] = lead + span * acc / wt;
+      acc += dw[i].w.length + 2;
+      e[i] = lead + span * acc / wt;
+    }
+    return { s: s, e: e, est: true };
+  }
+
+  function clearHL() {
+    if (!HL) return;
+    root.CSS.highlights.delete('oz-said');
+    root.CSS.highlights.delete('oz-now');
+  }
+
   // ── плеер ───────────────────────────────────────────────
   /* o = {
-   *   items: () => [{ id, dur, name, color }]   — только реплики со звуком, по порядку
+   *   items: () => [{ id, dur, name, color, words }] — только реплики со звуком, по порядку;
+ *          words — [[слово, начало, конец]] для пословной подсветки (необязательно)
    *   src:   (id) => Promise<url> | url
    *   el:    (id) => HTMLElement | null         — что подсвечивать
    *   gap:   () => мс паузы между репликами
@@ -268,6 +339,7 @@
       var self = this;
       this._stopRaf();
       this._paint(1);
+      this._hl(Infinity);
       if (this.loop) { this.a.currentTime = 0; this.a.play(); return; }
       if (this.one || this.idx >= this.list.length - 1) {
         this.playing = false;
@@ -276,13 +348,15 @@
         this._emit();
         return;
       }
-      var gap = Math.max(0, +(this.o.gap && this.o.gap()) || 0) / this.rate;
+      var gap = Math.max(0, +(this.o.gap && this.o.gap(this.list[this.idx])) || 0) / this.rate;
       this.playing = true;
       this._gapT = setTimeout(function () { self.playAt(self.idx + 1, false); }, gap);
     },
     _mark: function (on) {
       var it = this.list[this.idx];
       var el = it && this.o.el(it.id);
+      this._w = null;
+      clearHL();
       if (!el) return;
       el.classList.toggle('is-playing', on);
       el.style.setProperty('--p', '0');
@@ -306,11 +380,66 @@
       (function loop() {
         var d = self.a.duration;
         if (d && isFinite(d)) self._paint(self.a.currentTime / d);
+        self._hl(self.a.currentTime);
         if (self.o.onTick) self.o.onTick();
         self._raf = requestAnimationFrame(loop);
       })();
     },
     _stopRaf: function () { cancelAnimationFrame(this._raf); this._raf = 0; },
+
+    // Разметить слова текущей реплики: диапазоны в тексте + время каждого слова
+    _wPrep: function () {
+      var it = this.list[this.idx];
+      var el = it && this.o.el(it.id);
+      var box = el && (el.querySelector('.oz-text') || el);
+      if (!box) return null;
+      var tw = document.createTreeWalker(box, NodeFilter.SHOW_TEXT), nodes = [], str = '', n;
+      while ((n = tw.nextNode())) { nodes.push({ n: n, o: str.length }); str += n.nodeValue; }
+      var dw = wordsIn(str);
+      if (!dw.length) return null;
+      var d = this.a.duration;
+      var tm = timesFor(dw, it.words, isFinite(d) ? d : it.dur);
+      if (!tm) return null;
+      function pos(off, end) {
+        for (var i = nodes.length - 1; i >= 0; i--) {
+          if (off > nodes[i].o || (!end && off === nodes[i].o)) return [nodes[i].n, off - nodes[i].o];
+        }
+        return [nodes[0].n, 0];
+      }
+      var ranges = dw.map(function (w) {
+        var r = document.createRange(), a = pos(w.a, false), b = pos(w.b, true);
+        try { r.setStart(a[0], a[1]); r.setEnd(b[0], b[1]); } catch (e) {}
+        return r;
+      });
+      return { id: it.id, box: box, r: ranges, s: tm.s, e: tm.e, k: -2 };
+    },
+    // Подсветить слова до момента t: сказанные — маркером, звучащее — ярче
+    _hl: function (t) {
+      if (!HL || root.OzWordHL === false) return;
+      var it = this.list[this.idx];
+      if (!it) return;
+      var w = this._w;
+      if (!w || w.id !== it.id || !w.box.isConnected) w = this._w = this._wPrep();
+      if (!w) return;
+      var k = -1, n = w.s.length;
+      if (t === Infinity) k = n;
+      else {
+        var i = w.k >= 0 && w.k < n && w.s[w.k] <= t + 0.04 ? w.k : 0;
+        for (; i < n && w.s[i] <= t + 0.04; i++) k = i;
+      }
+      if (k === w.k) return;
+      w.k = k;
+      var said = w.r.slice(0, Math.max(0, Math.min(k, n)));
+      var now = k >= 0 && k < n && t <= w.e[k] + 0.25 ? [w.r[k]] : [];
+      if (k >= 0 && k < n && !now.length) said = w.r.slice(0, k + 1);
+      try {
+        var hs = new root.Highlight(), hn = new root.Highlight();
+        said.forEach(function (r) { hs.add(r); });
+        now.forEach(function (r) { hn.add(r); });
+        root.CSS.highlights.set('oz-said', hs);
+        root.CSS.highlights.set('oz-now', hn);
+      } catch (e) {}
+    },
     _meta: function (it) {
       if (!('mediaSession' in navigator) || !root.MediaMetadata) return;
       try {
@@ -444,5 +573,7 @@
   root.OzText = { esc: esc, sanitize: sanitize, plain: plain, hideTags: hideTags, fmtTime: fmtTime };
   root.OzRender = { doc: render };
   root.OzPlayer = Player;
+  root.OzGap = gapMs;
+  root.OzWords = { supported: HL, wordsIn: wordsIn };
   root.OzBar = Bar;
 })(window);

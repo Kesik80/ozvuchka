@@ -1,7 +1,9 @@
 // api/speak.js — озвучка одной реплики через ElevenLabs.
 //
-// POST { token, text, voiceId, modelId, voiceSettings, previousText, nextText, keyIndex, format }
+// POST { token, text, voiceId, modelId, voiceSettings, previousText, nextText, keyIndex, format, timestamps }
 //   → 200 audio/mpeg (сырые байты MP3), заголовок X-Key-Index — какой аккаунт озвучил
+//   → 200 JSON { audio: base64, words: [[слово, начало, конец], …], keyIndex, model }
+//     — если timestamps: true: время каждого слова для пословной подсветки
 //   → 4xx/5xx JSON { error, code?, details? }
 //
 // Звук отдаётся бинарно, а не base64 в JSON: на треть меньше трафика,
@@ -18,6 +20,37 @@ const VOICE_ID = /^[A-Za-z0-9]{15,40}$/;
 const ALLOWED_MODELS = ['eleven_v3', 'eleven_multilingual_v2', 'eleven_flash_v2_5'];
 const ALLOWED_FORMATS = ['mp3_44100_64', 'mp3_44100_128'];
 const MAX_CHARS = 3000;   // у eleven_v3 предел запроса — 3000 символов
+const MAX_JSON = 4_000_000; // лимит ответа Vercel ~4,5 МБ: длиннее — отдаём звук без слов
+
+// Слова с временем из посимвольной разметки ElevenLabs. [теги] v3 пропускаем:
+// читатель их не видит, подсвечивать нечего.
+let WORD_RE;
+try { WORD_RE = new RegExp("[\\p{L}\\p{N}]+(?:['’\\-][\\p{L}\\p{N}]+)*", 'gu'); }
+catch (e) { WORD_RE = /[A-Za-zÀ-ÿА-яЁёІіЇїЄєҐґ0-9]+/g; }
+const TAG_RE = /\[[a-zA-Z][a-zA-Z \-']{0,30}\]/g;
+
+function toWords(al) {
+  if (!al || !Array.isArray(al.characters)) return null;
+  const chars = al.characters, st = al.character_start_times_seconds || [], en = al.character_end_times_seconds || [];
+  // строка + «какой символ разметки стоит на этой позиции» (эмодзи — две позиции на один символ)
+  let str = '';
+  const at = [];
+  chars.forEach((c, i) => { c = String(c); str += c; for (let k = 0; k < c.length; k++) at.push(i); });
+  const skip = [];
+  let m;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(str))) skip.push([m.index, m.index + m[0].length]);
+  const out = [];
+  WORD_RE.lastIndex = 0;
+  while ((m = WORD_RE.exec(str))) {
+    const a = m.index, z = a + m[0].length - 1;
+    if (skip.some((s) => a >= s[0] && a < s[1])) continue;
+    const s0 = +st[at[a]], e0 = +en[at[z]];
+    if (!Number.isFinite(s0) || !Number.isFinite(e0)) continue;
+    out.push([m[0].toLowerCase().replace(/’/g, "'"), Math.round(s0 * 1000) / 1000, Math.round(e0 * 1000) / 1000]);
+  }
+  return out.length ? out : null;
+}
 
 const num = (v, min, max, dflt) => {
   const n = parseFloat(v);
@@ -85,13 +118,16 @@ export default async function handler(req, res) {
   }
 
   let lastError = null;
-  for (const idx of order) {
+  let withTs = b.timestamps === true;
+  for (let n = 0; n < order.length; n++) {
+    const idx = order[n];
     try {
+      const vid = voiceMap[idx] || b.voiceId;
       const r = await fetch(
-        `https://api.elevenlabs.io/v1/text-to-speech/${voiceMap[idx] || b.voiceId}?output_format=${format}`,
+        `https://api.elevenlabs.io/v1/text-to-speech/${vid}${withTs ? '/with-timestamps' : ''}?output_format=${format}`,
         {
           method: 'POST',
-          headers: { Accept: 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': keys[idx] },
+          headers: { Accept: withTs ? 'application/json' : 'audio/mpeg', 'Content-Type': 'application/json', 'xi-api-key': keys[idx] },
           body: JSON.stringify(body),
         }
       );
@@ -111,7 +147,25 @@ export default async function handler(req, res) {
           lastError = { error: 'У аккаунта ' + (idx + 1) + ' кончились символы', details, code: 'credits' };
           continue;
         }
+        // модель не умеет отдавать время слов — тот же аккаунт ещё раз, обычной озвучкой
+        if (withTs && (r.status === 400 || r.status === 404 || r.status === 422)) {
+          withTs = false;
+          n--;
+          continue;
+        }
         return res.status(502).json({ error: 'ElevenLabs ' + r.status, details });
+      }
+      if (withTs) {
+        const d = await r.json();
+        const words = toWords(d.alignment) || toWords(d.normalized_alignment);
+        if (d.audio_base64 && d.audio_base64.length < MAX_JSON) {
+          return res.status(200).json({ audio: d.audio_base64, words, keyIndex: idx, model });
+        }
+        const big = Buffer.from(String(d.audio_base64 || ''), 'base64');
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('X-Key-Index', String(idx));
+        res.setHeader('X-Model', model);
+        return res.status(200).send(big);
       }
       const audio = Buffer.from(await r.arrayBuffer());
       res.setHeader('Content-Type', 'audio/mpeg');
