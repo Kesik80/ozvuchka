@@ -126,7 +126,27 @@
   // Слова сопоставляются по порядку с небольшим окном: если текст чуть поправили
   // после озвучки, подсветка не съезжает до конца реплики.
   // Нет разметки (свой файл, старая озвучка) — оценка по длине слов.
-  function timesFor(dw, tw, dur) {
+  // Сколько «звучит» слово в оценке: цифры читаются длиннее, чем пишутся
+  // (19 → neunzehn, 2024 → zweitausendvierundzwanzig).
+  function spokenLen(w) {
+    if (!/^\d+$/.test(w)) return w.length;
+    var n = +w;
+    if (w.length === 4 && n >= 1100 && n < 2100) return 20;   // год
+    if (n <= 12) return 5;
+    if (n < 20) return 8;
+    if (n < 100) return 13;
+    if (n < 1000) return 18;
+    return 24;
+  }
+  // пауза после слова: точка — длинная, запятая/тире — короче
+  function pauseAfter(str, b) {
+    var tail = (str || '').slice(b, b + 3);
+    if (/^\s*[.!?\u2026]/.test(tail)) return 7;
+    if (/^\s*[,;:\u2013\u2014-]/.test(tail)) return 4;
+    return 0;
+  }
+
+  function timesFor(dw, tw, dur, str) {
     var n = dw.length, s = new Array(n), e = new Array(n), i, j = 0, k;
     if (tw && tw.length) {
       for (i = 0; i < n; i++) {
@@ -148,11 +168,17 @@
     }
     if (!dur) return null;
     var wt = 0, acc = 0, lead = Math.min(0.15, dur * 0.04), span = Math.max(0.1, dur - lead - Math.min(0.3, dur * 0.06));
-    for (i = 0; i < n; i++) wt += dw[i].w.length + 2;
+    var len = [], gap = [];
+    for (i = 0; i < n; i++) {
+      len[i] = spokenLen(dw[i].w) + 1;
+      gap[i] = i < n - 1 ? 1 + pauseAfter(str, dw[i].b) : 0;
+      wt += len[i] + gap[i];
+    }
     for (i = 0; i < n; i++) {
       s[i] = lead + span * acc / wt;
-      acc += dw[i].w.length + 2;
+      acc += len[i];
       e[i] = lead + span * acc / wt;
+      acc += gap[i];
     }
     return { s: s, e: e, est: true };
   }
@@ -197,6 +223,8 @@
   // Докуда закрасить реплику к моменту t (в символах). Внутри слова маркер
   // растёт по буквам, после слова захватывает знаки препинания.
   var PUNCT = /[.,!?;:\u2026"\u201c\u201d\u201e\u00bb\u00ab)\]\u2013\u2014-]/;
+  // Маркер чуть опережает звук: глаз должен видеть слово в момент, когда его слышно.
+  var MK_LEAD = 0.12;
   function karaOffset(K, t, dur) {
     var str = K.str, n = str.length, off = 0;
     if (t === Infinity) return n;
@@ -460,8 +488,8 @@
         var dw = wordsIn(el._kt);
         K = this._k = { id: it.id, el: el, str: el._kt, dw: dw, tm: null, off: -1 };
       }
-      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d);
-      var off = karaOffset(K, t, d);
+      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d, K.str);
+      var off = karaOffset(K, t === Infinity ? t : t + MK_LEAD, d);
       if (off === K.off) return true;
       K.off = off;
       el.innerHTML = off > 0 ? '<span class="kr-mk">' + esc(K.str.slice(0, off)) + '</span>' + esc(K.str.slice(off)) : esc(K.str);
@@ -486,8 +514,8 @@
       d = isFinite(d) && d > 0 ? d : it.dur;
       if (!K || K.id !== it.id || K.el !== el || !K.box.isConnected) K = this._w = this._mkPrep(el, it);
       if (!K.nodes.length) return;
-      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d);
-      var off = karaOffset(K, t, d);
+      if (!K.tm && K.dw.length && d) K.tm = timesFor(K.dw, it.words, d, K.str);
+      var off = karaOffset(K, t === Infinity ? t : t + MK_LEAD, d);
       if (off === K.off) return;
       K.off = off;
       el.classList.add('oz-mk-on');

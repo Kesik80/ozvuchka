@@ -1002,7 +1002,8 @@
       row.appendChild(h('button', { class: 'btn', type: 'button', onclick: function () { s.close(); pickAudioFor(b); } }, 'Свой файл…'));
       box.appendChild(row);
       if (S.errors[b.id]) box.appendChild(h('p', { class: 'note', style: 'color:var(--onair)' }, esc(S.errors[b.id])));
-      else box.appendChild(h('p', { class: 'note' }, esc(STATUS_TEXT[st] || '') + (b.audio && b.audio.dur ? ' · ' + T.fmtTime(b.audio.dur) : '')));
+      else box.appendChild(h('p', { class: 'note' }, esc(STATUS_TEXT[st] || '') + (b.audio && b.audio.dur ? ' · ' + T.fmtTime(b.audio.dur) : '') +
+        (b.audio ? (b.audio.words ? ' · маркер точный' : ' · маркер примерный — «Озвучить заново» сделает точным') : '')));
       if (b.audio) box.appendChild(h('button', { class: 'btn ghost danger sm', type: 'button', onclick: function () {
         dropAudio(b.audio.key); b.audio = null; s.close(); renderAll(); touch();
       } }, 'Удалить звук'));
