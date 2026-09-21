@@ -471,6 +471,28 @@
     return { prev: p, next: n };
   }
 
+  // Реплики с примерным маркером: озвучены ElevenLabs до того, как появилось время слов.
+  // Свои файлы не трогаем — их не переозвучить.
+  function roughMarker() {
+    var list = [], chars = 0;
+    S.proj.blocks.forEach(function (b) {
+      if (!isLine(b) || !b.audio || b.audio.src !== 'tts' || b.audio.words) return;
+      if (!roleById(b.roleId).voiceId) return;
+      list.push(b);
+      chars += ttsText(b).length;
+    });
+    return { list: list, chars: chars };
+  }
+  function fixMarkers() {
+    var w = roughMarker();
+    if (!w.list.length) { toast('У всех реплик маркер уже точный'); return; }
+    var left = S.quota && (S.quota.accounts || []).reduce(function (n, a) { return n + (a.error ? 0 : a.left || 0); }, 0);
+    if (!confirm('Переозвучить ' + w.list.length + ' ' + plural(w.list.length, 'реплику', 'реплики', 'реплик') +
+      ' для точного маркера?\n\nЭто ' + nf(w.chars) + ' симв.' + (left ? ' (осталось ' + nf(left) + ')' : '') +
+      '. Голоса те же, звук может чуть отличаться.')) return;
+    generate(w.list.map(function (b) { return b.id; }));
+  }
+
   function generate(ids) {
     if (!ids.length) return;
     if (!S.token) { openLogin(function () { generate(ids); }); return; }
@@ -2215,6 +2237,9 @@
     item('Проекты', S.projects.length + ' ' + plural(S.projects.length, 'проект', 'проекта', 'проектов'), openProjects);
     item('Импорт текста', 'Вставить диалог, .txt, .docx или открыть скачанную страницу', function () { openImport(); });
     item('Скачать', 'Страница со звуком, MP3 или текст', openExport);
+    var rough = roughMarker();
+    if (rough.list.length) item('Сделать маркер точным', rough.list.length + ' ' + plural(rough.list.length, 'реплика', 'реплики', 'реплик') +
+      ' с примерным маркером · ' + nf(rough.chars) + ' симв.', fixMarkers);
     item('Настройки', 'Тема, пауза, качество, аккаунты ElevenLabs', function () { openSettings(); });
     item('Как это работает', null, openHelp);
     s = sheet('Меню', box);
